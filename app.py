@@ -1042,4 +1042,7 @@ if __name__ == '__main__':
     logger.info(f"Starting Sonos Album Player on port {port}")
     logger.info(f"Run 'python app.py scan' to index your music library")
     
-    app.run(host='0.0.0.0', port=port, debug=True, threaded=True)
+    # Keep the auto-reloader (convenient for scp-to-deploy) but disable the
+    # interactive debugger — the Werkzeug debug console is a remote-code-execution
+    # risk on an unauthenticated app bound to 0.0.0.0, and its error pages leak source.
+    app.run(host='0.0.0.0', port=port, use_reloader=True, use_debugger=False, threaded=True)
