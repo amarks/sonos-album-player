@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  sonos-player:
+    build: .
+    container_name: sonos-album-player
+    ports:
+      - "5000:5000"
+    volumes:
+      # Mount your music directory (adjust path to your NAS)
+      - /volume1/music:/music:ro
+      # Mount config and database directory
+      - ./data:/data
+      # Mount config file
+      - ./config.json:/app/config.json
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      - TZ=America/Los_Angeles

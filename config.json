@@ -1,0 +1,7 @@
+{
+  "sonos_ip": "192.168.4.35",
+  "music_directory": "/volume1/Music",
+  "database_path": "./sonos_albums.db",
+  "port": 5100,
+  "items_per_page": 1000
+}
