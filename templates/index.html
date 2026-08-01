@@ -288,6 +288,21 @@
         .queue-item:active { cursor: grabbing; opacity: 0.5; }
         .queue-item.now-playing { border-color: var(--accent-border); }
 
+        /* drop indicator when reordering the queue */
+        .queue-item.drop-before::before,
+        .queue-item.drop-after::after {
+            content: '';
+            position: absolute;
+            left: 6px;
+            right: 6px;
+            height: 2px;
+            background: var(--accent);
+            border-radius: 2px;
+            pointer-events: none;
+        }
+        .queue-item.drop-before::before { top: -3px; }
+        .queue-item.drop-after::after  { bottom: -3px; }
+
         .queue-item img {
             width: 42px;
             height: 42px;
@@ -353,11 +368,48 @@
         .albums-section {
             overflow-y: auto;
             background: var(--bg);
-            display: flex;
-            flex-direction: column;
-            gap: 16px;
-            padding: 20px;
         }
+
+        /* ── Genre chips ─────────────────────────── */
+        .genre-bar {
+            display: none;               /* shown only in Genre mode */
+            flex-wrap: wrap;
+            gap: 8px;
+            position: sticky;
+            top: 0;
+            padding: 14px 20px;
+            background: var(--bg);
+            border-bottom: 1px solid var(--border);
+            z-index: 5;
+        }
+
+        .genre-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            border: 1px solid var(--border);
+            background: var(--surface);
+            color: var(--text-2);
+            border-radius: 16px;
+            font-size: 12.5px;
+            font-weight: 500;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: all 0.15s;
+        }
+
+        .genre-chip:hover { color: var(--text); border-color: rgba(255,255,255,0.18); }
+
+        .genre-chip.active {
+            background: var(--accent);
+            color: var(--on-accent);
+            border-color: var(--accent);
+            font-weight: 700;
+        }
+
+        .gc-count { font-size: 11px; opacity: 0.6; }
+        .genre-chip.active .gc-count { opacity: 0.8; }
 
         .header-search {
             flex: 1;
@@ -395,6 +447,7 @@
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(175px, 1fr));
             gap: 14px;
+            padding: 20px;
         }
 
         .album-card {
@@ -910,8 +963,8 @@
             .search-results { display: none; }
 
             /* Full-width albums */
-            .albums-section { padding: 14px; }
-            .albums-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+            .albums-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; padding: 14px; }
+            .genre-bar { padding: 10px 14px; }
 
             /* Player bar: stack now-playing above controls */
             .player-controls {
@@ -993,6 +1046,7 @@
 
     <!-- Albums -->
     <div class="albums-section">
+        <div class="genre-bar" id="genreBar"></div>
         <div class="albums-grid" id="albumsGrid">
             <div style="color:var(--text-2);padding:20px;font-size:14px;">Loading…</div>
         </div>
@@ -1057,8 +1111,10 @@
     let filteredAlbums = [];
     let queue          = [];
     let currentSort    = 'artist';
+    let genreFilter    = '';
     let isPlaying      = false;
     let draggedAlbum   = null;
+    let draggedQueueIndex = null;
     let currentModalAlbum = null;
     let currentPlayingAlbum = null;
     let speakerList    = [];
@@ -1090,10 +1146,14 @@
         try {
             const res  = await fetch(`/api/albums?sort=${sort}`);
             const data = await res.json();
-            albums         = data.albums;
-            filteredAlbums = albums;
-            renderAlbums();
-            updateSearchResults();
+            albums = data.albums;
+            if (sort === 'genre') {
+                buildGenreBar();
+            } else {
+                document.getElementById('genreBar').style.display = 'none';
+                genreFilter = '';
+            }
+            filterAlbums();  // applies search + genre filter, then renders
             document.querySelectorAll('.sort-btn').forEach(b =>
                 b.classList.toggle('active', b.dataset.sort === sort));
             if (currentSort === sort) loadQueueState();  // restore once on initial load
@@ -1183,21 +1243,44 @@
 
     function filterAlbums() {
         const term = document.getElementById('searchBox').value.toLowerCase().trim();
-        filteredAlbums = term
-            ? albums.filter(a =>
-                (a.title  || '').toLowerCase().includes(term) ||
-                (a.artist || '').toLowerCase().includes(term) ||
-                (a.genre  || '').toLowerCase().includes(term))
-            : albums;
+        filteredAlbums = albums.filter(a => {
+            if (genreFilter && (a.genre || 'Unknown') !== genreFilter) return false;
+            if (!term) return true;
+            return (a.title  || '').toLowerCase().includes(term) ||
+                   (a.artist || '').toLowerCase().includes(term) ||
+                   (a.genre  || '').toLowerCase().includes(term);
+        });
         renderAlbums();
         updateSearchResults();
     }
 
     function updateSearchResults() {
         const term = document.getElementById('searchBox').value.trim();
-        document.getElementById('searchResults').textContent = term
+        document.getElementById('searchResults').textContent = (term || genreFilter)
             ? `${filteredAlbums.length} of ${albums.length} albums`
             : `${albums.length} albums`;
+    }
+
+    // Build the clickable genre chips (shown in Genre mode) from the library's genres
+    function buildGenreBar() {
+        const bar = document.getElementById('genreBar');
+        const counts = {};
+        albums.forEach(a => { const g = a.genre || 'Unknown'; counts[g] = (counts[g] || 0) + 1; });
+        if (genreFilter && !counts[genreFilter]) genreFilter = '';
+        const genres = Object.keys(counts).sort((a, b) => counts[b] - counts[a] || a.localeCompare(b));
+        bar.innerHTML =
+            `<button class="genre-chip ${genreFilter === '' ? 'active' : ''}" data-genre="">All <span class="gc-count">${albums.length}</span></button>` +
+            genres.map(g =>
+                `<button class="genre-chip ${genreFilter === g ? 'active' : ''}" data-genre="${esc(g)}">${esc(g)} <span class="gc-count">${counts[g]}</span></button>`
+            ).join('');
+        bar.style.display = 'flex';
+        bar.querySelectorAll('.genre-chip').forEach(chip =>
+            chip.addEventListener('click', () => {
+                genreFilter = chip.dataset.genre;
+                bar.querySelectorAll('.genre-chip').forEach(c =>
+                    c.classList.toggle('active', c.dataset.genre === genreFilter));
+                filterAlbums();
+            }));
     }
 
     // ── Queue ─────────────────────────────────────────────────────────────
@@ -1279,10 +1362,7 @@
         queue.splice(index, 1);
         renderQueue();
         saveQueueState();
-        try {
-            await fetch('/api/queue/clear', { method: 'POST' });
-            for (const a of queue) await fetch(`/api/queue/add/${a.id}`, { method: 'POST' });
-        } catch (e) { console.error(e); }
+        await resyncSonosQueue();
     }
 
     function saveQueueState() {
@@ -1312,33 +1392,92 @@
     }
 
     function handleQueueDragStart(event) {
+        draggedQueueIndex = parseInt(event.currentTarget.dataset.queueIndex);
         event.dataTransfer.setData('queueIndex', event.currentTarget.dataset.queueIndex);
+        event.dataTransfer.effectAllowed = 'move';
         event.currentTarget.style.opacity = '0.4';
     }
 
     function handleQueueDragEnd(event) {
         event.currentTarget.style.opacity = '';
+        draggedQueueIndex = null;
+        clearDropMarkers();
     }
 
     const queueEl = document.getElementById('queueList');
 
     queueEl.addEventListener('dragover', e => {
         e.preventDefault();
-        e.dataTransfer.dropEffect = 'copy';
-        queueEl.classList.add('drag-over');
+        if (draggedQueueIndex !== null) {           // reordering an existing item
+            e.dataTransfer.dropEffect = 'move';
+            showDropMarker(computeDropIndex(e.clientY));
+        } else {                                     // dropping a new album from the grid
+            e.dataTransfer.dropEffect = 'copy';
+            queueEl.classList.add('drag-over');
+        }
     });
 
-    queueEl.addEventListener('dragleave', () => queueEl.classList.remove('drag-over'));
+    queueEl.addEventListener('dragleave', e => {
+        if (!queueEl.contains(e.relatedTarget)) {    // only when truly leaving the list
+            queueEl.classList.remove('drag-over');
+            clearDropMarkers();
+        }
+    });
 
     queueEl.addEventListener('drop', async e => {
         e.preventDefault();
         queueEl.classList.remove('drag-over');
-        const queueIndex = e.dataTransfer.getData('queueIndex');
-        if (queueIndex === '' && draggedAlbum) {
+        if (draggedQueueIndex !== null) {
+            const to = computeDropIndex(e.clientY);
+            clearDropMarkers();
+            await moveQueueItem(draggedQueueIndex, to);
+            draggedQueueIndex = null;
+        } else if (draggedAlbum) {
             await addAlbumToQueue(draggedAlbum.id, null);
         }
         draggedAlbum = null;
     });
+
+    // Where in the queue a drop at pointer-Y would land
+    function computeDropIndex(y) {
+        const items = [...queueEl.querySelectorAll('.queue-item')];
+        for (let i = 0; i < items.length; i++) {
+            const r = items[i].getBoundingClientRect();
+            if (y < r.top + r.height / 2) return i;
+        }
+        return items.length;
+    }
+
+    function showDropMarker(index) {
+        clearDropMarkers();
+        const items = queueEl.querySelectorAll('.queue-item');
+        if (!items.length) return;
+        if (index >= items.length) items[items.length - 1].classList.add('drop-after');
+        else items[index].classList.add('drop-before');
+    }
+
+    function clearDropMarkers() {
+        queueEl.querySelectorAll('.drop-before, .drop-after')
+            .forEach(el => el.classList.remove('drop-before', 'drop-after'));
+    }
+
+    // Rebuild the Sonos queue to match the current local order
+    async function resyncSonosQueue() {
+        try {
+            await fetch('/api/queue/clear', { method: 'POST' });
+            for (const a of queue) await fetch(`/api/queue/add/${a.id}`, { method: 'POST' });
+        } catch (e) { console.error(e); }
+    }
+
+    async function moveQueueItem(from, to) {
+        const [item] = queue.splice(from, 1);
+        const target = to > from ? to - 1 : to;
+        if (target === from) { queue.splice(from, 0, item); return; }  // dropped in place
+        queue.splice(target, 0, item);
+        renderQueue();
+        saveQueueState();
+        await resyncSonosQueue();
+    }
 
     // ── Player controls ───────────────────────────────────────────────────
     async function togglePlayPause() {
