@@ -779,10 +779,10 @@
         .hovercard {
             position: fixed;
             z-index: 900;
-            background: var(--surface);
-            border: 1px solid var(--border);
+            background: var(--surface-2);
+            border: 1px solid rgba(255,255,255,0.15);
             border-radius: 12px;
-            box-shadow: 0 20px 50px rgba(0,0,0,0.6);
+            box-shadow: 0 16px 48px rgba(0,0,0,0.75), 0 2px 8px rgba(0,0,0,0.5);
             padding: 12px;
             pointer-events: none;
             opacity: 0;
@@ -1707,7 +1707,7 @@
                 `<div class="hovercard-sub">${esc(album.artist || 'Unknown Artist')}</div>` +
                 (meta ? `<div class="hovercard-meta">${meta}</div>` : '');
             placeHover(card.getBoundingClientRect(), false);
-        }, 350);
+        }, 500);
     }
 
     function scheduleQueueHover(item) {
@@ -1733,7 +1733,7 @@
                 (more > 0 ? `<div class="hovercard-more">+ ${more} more</div>` : '');
             const el = document.querySelector(`.queue-item[data-queue-index="${idx}"]`);
             placeHover((el || item).getBoundingClientRect(), false);
-        }, 350);
+        }, 500);
     }
 
     // Only wire hover previews on devices that actually hover (skip touch)
