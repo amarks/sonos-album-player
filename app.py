@@ -25,6 +25,7 @@ import logging
 
 app = Flask(__name__)
 CORS(app)
+app.config['TEMPLATES_AUTO_RELOAD'] = True  # pick up index.html edits without a restart
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
