@@ -171,14 +171,16 @@ def _majority(values):
     return Counter(vals).most_common(1)[0][0]
 
 def _meta_of(audio):
-    """(album, artist, genre, year) from an opened mutagen file; None where absent.
-    Artist prefers track artist then album-artist, matching prior behavior."""
-    album = artist = genre = year = None
+    """(album, album_artist, track_artist, genre, year) from an opened mutagen file.
+    Album-artist (TPE2/albumartist) and track-artist (TPE1/artist) are returned
+    separately so callers can prefer the album-artist for display and grouping."""
+    album = album_artist = track_artist = genre = year = None
     tags = getattr(audio, 'tags', None)
     if tags:
         if hasattr(tags, 'getall'):  # ID3 (MP3)
             av = tags.getall('TALB'); album = str(av[0]) if av else None
-            pv = tags.getall('TPE1') or tags.getall('TPE2'); artist = str(pv[0]) if pv else None
+            a2 = tags.getall('TPE2'); album_artist = str(a2[0]) if a2 else None
+            a1 = tags.getall('TPE1'); track_artist = str(a1[0]) if a1 else None
             gv = tags.getall('TCON'); genre = str(gv[0]) if gv else None
             yv = tags.getall('TDRC')
             if yv:
@@ -192,7 +194,8 @@ def _meta_of(audio):
                         return str(v[0]) if isinstance(v, list) else str(v)
                 return None
             album = dget(['album', 'ALBUM', 'Album', '\xa9alb'])
-            artist = dget(['artist', 'ARTIST', 'Artist', 'albumartist', 'ALBUMARTIST', '\xa9ART', 'aART'])
+            album_artist = dget(['albumartist', 'ALBUMARTIST', 'aART'])
+            track_artist = dget(['artist', 'ARTIST', 'Artist', '\xa9ART'])
             genre = dget(['genre', 'GENRE', 'Genre', '\xa9gen'])
             ys = dget(['date', 'DATE', 'Date', 'year', 'YEAR', '\xa9day'])
             if ys:
@@ -200,7 +203,7 @@ def _meta_of(audio):
                 except Exception: pass
     if not album and hasattr(audio, 'info') and hasattr(audio.info, 'album'):
         album = audio.info.album
-    return album, artist, genre, year
+    return album, album_artist, track_artist, genre, year
 
 def _track_of(audio, path):
     """(title, track_number, disc_number) for one file. Falls back to filename."""
@@ -415,15 +418,21 @@ def scan_music_library(full=False):
                 audio = File(str(f))
                 if audio is None:
                     continue
-                alb, art, gen, yr = _meta_of(audio)
+                alb, aa, ta, gen, yr = _meta_of(audio)
                 title, tnum, disc = _track_of(audio, f)
-                metas.append({'album': alb, 'artist': art, 'genre': gen, 'year': yr,
+                metas.append({'album': alb, 'albumartist': aa, 'trackartist': ta,
+                              'genre': gen, 'year': yr,
                               'title': title, 'track': tnum, 'disc': disc, 'path': str(f)})
             if not metas:
                 continue
 
             album_title = _majority(m['album'] for m in metas) or album_dir.name
-            artist = _majority(m['artist'] for m in metas) or 'Unknown Artist'
+            # Prefer the album-artist tag so a compilation shows "Various Artists"
+            # rather than whichever track artist happens to have the most tracks;
+            # fall back to the track artist, then Unknown.
+            artist = (_majority(m['albumartist'] for m in metas)
+                      or _majority(m['trackartist'] for m in metas)
+                      or 'Unknown Artist')
             genre = _majority(m['genre'] for m in metas) or 'Unknown'
             year = _majority(m['year'] for m in metas)
 
