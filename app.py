@@ -14,6 +14,7 @@ from pathlib import Path
 import base64
 import time
 import threading
+from collections import Counter, defaultdict
 from mutagen import File
 from mutagen.id3 import ID3, APIC
 from mutagen.flac import FLAC, Picture
@@ -84,7 +85,13 @@ def init_db():
                   path TEXT UNIQUE NOT NULL,
                   duration INTEGER,
                   FOREIGN KEY (album_id) REFERENCES albums(id))''')
-    
+
+    # Migrate older databases that predate the disc_number column
+    try:
+        c.execute('ALTER TABLE tracks ADD COLUMN disc_number INTEGER DEFAULT 0')
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
     c.execute('''CREATE INDEX IF NOT EXISTS idx_album_artist ON albums(artist)''')
     c.execute('''CREATE INDEX IF NOT EXISTS idx_album_title ON albums(title)''')
     c.execute('''CREATE INDEX IF NOT EXISTS idx_album_genre ON albums(genre)''')
@@ -154,6 +161,126 @@ def _names_match(query, candidate):
     if not q or not c:
         return False
     return q in c or c in q
+
+def _majority(values):
+    """Most common non-empty value, or None. Used to derive album-level fields
+    from all tracks in a folder rather than trusting one arbitrary first file."""
+    vals = [v for v in values if v]
+    if not vals:
+        return None
+    return Counter(vals).most_common(1)[0][0]
+
+def _meta_of(audio):
+    """(album, artist, genre, year) from an opened mutagen file; None where absent.
+    Artist prefers track artist then album-artist, matching prior behavior."""
+    album = artist = genre = year = None
+    tags = getattr(audio, 'tags', None)
+    if tags:
+        if hasattr(tags, 'getall'):  # ID3 (MP3)
+            av = tags.getall('TALB'); album = str(av[0]) if av else None
+            pv = tags.getall('TPE1') or tags.getall('TPE2'); artist = str(pv[0]) if pv else None
+            gv = tags.getall('TCON'); genre = str(gv[0]) if gv else None
+            yv = tags.getall('TDRC')
+            if yv:
+                try: year = int(str(yv[0])[:4])
+                except Exception: pass
+        else:  # Vorbis (FLAC/OGG) / MP4
+            def dget(keys):
+                for k in keys:
+                    if k in tags:
+                        v = tags[k]
+                        return str(v[0]) if isinstance(v, list) else str(v)
+                return None
+            album = dget(['album', 'ALBUM', 'Album', '\xa9alb'])
+            artist = dget(['artist', 'ARTIST', 'Artist', 'albumartist', 'ALBUMARTIST', '\xa9ART', 'aART'])
+            genre = dget(['genre', 'GENRE', 'Genre', '\xa9gen'])
+            ys = dget(['date', 'DATE', 'Date', 'year', 'YEAR', '\xa9day'])
+            if ys:
+                try: year = int(str(ys)[:4])
+                except Exception: pass
+    if not album and hasattr(audio, 'info') and hasattr(audio.info, 'album'):
+        album = audio.info.album
+    return album, artist, genre, year
+
+def _track_of(audio, path):
+    """(title, track_number, disc_number) for one file. Falls back to filename."""
+    title = None; track = 0; disc = 0
+    tags = getattr(audio, 'tags', None)
+    if tags:
+        if hasattr(tags, 'getall'):  # ID3
+            tv = tags.getall('TIT2'); title = str(tv[0]) if tv else None
+            nv = tags.getall('TRCK')
+            if nv:
+                try: track = int(str(nv[0]).split('/')[0])
+                except Exception: pass
+            dv = tags.getall('TPOS')
+            if dv:
+                try: disc = int(str(dv[0]).split('/')[0])
+                except Exception: pass
+        else:  # Vorbis / MP4
+            def dget(keys):
+                for k in keys:
+                    if k in tags:
+                        return tags[k]
+                return None
+            tt = dget(['title', 'TITLE', 'Title', '\xa9nam'])
+            if tt is not None:
+                title = str(tt[0]) if isinstance(tt, list) else str(tt)
+            nn = dget(['tracknumber', 'TRACKNUMBER', 'trkn'])
+            if nn is not None:
+                val = nn[0] if isinstance(nn, list) else nn
+                if isinstance(val, tuple):
+                    track = val[0]
+                else:
+                    try: track = int(str(val).split('/')[0])
+                    except Exception: pass
+            dd = dget(['discnumber', 'DISCNUMBER', 'disc', 'disk', 'disknumber', 'disk'])
+            if dd is not None:
+                val = dd[0] if isinstance(dd, list) else dd
+                if isinstance(val, tuple):
+                    disc = val[0]
+                else:
+                    try: disc = int(str(val).split('/')[0])
+                    except Exception: pass
+    if not title:
+        title = os.path.basename(str(path))
+    return title, track, disc
+
+def consolidate_multidisc(c):
+    """Merge albums that are really one multi-disc release split across folders
+    (Disc 1 / Disc 2 / ...). Groups album rows by normalized (artist, album) and,
+    when the members carry distinct non-zero disc numbers, folds them into the
+    lowest-disc album (repointing tracks, summing track_count). Deterministic and
+    idempotent, so it can run at the end of every scan. Returns count merged."""
+    rows = c.execute('SELECT id, artist, title FROM albums').fetchall()
+    groups = defaultdict(list)
+    for aid, artist, title in rows:
+        groups[(_norm(artist), _norm(title))].append(aid)
+
+    merged = 0
+    for key, ids in groups.items():
+        if len(ids) < 2 or key == ('', ''):
+            continue
+        # Representative disc per album (min non-zero disc number of its tracks)
+        disc_of = {}
+        for aid in ids:
+            row = c.execute('SELECT MIN(disc_number) FROM tracks '
+                            'WHERE album_id=? AND disc_number>0', (aid,)).fetchone()
+            disc_of[aid] = row[0] if row and row[0] else 0
+        discs = [disc_of[aid] for aid in ids]
+        # Only merge a clean multi-disc set: every member has a disc, all distinct
+        if 0 in discs or len(set(discs)) != len(discs):
+            continue
+        primary = min(ids, key=lambda a: disc_of[a])
+        for aid in ids:
+            if aid == primary:
+                continue
+            c.execute('UPDATE tracks SET album_id=? WHERE album_id=?', (primary, aid))
+            c.execute('DELETE FROM albums WHERE id=?', (aid,))
+            merged += 1
+        cnt = c.execute('SELECT COUNT(*) FROM tracks WHERE album_id=?', (primary,)).fetchone()[0]
+        c.execute('UPDATE albums SET track_count=? WHERE id=?', (cnt, primary))
+    return merged
 
 def fetch_art_online(artist, album):
     """Look up album art via the iTunes Search API. Returns base64 JPEG or None.
@@ -281,93 +408,28 @@ def scan_music_library(full=False):
             continue
 
         try:
-            # Get metadata from first file
-            first_file = File(str(files[0]))
-            if first_file is None:
+            # Read every track's tags once. Derive album-level fields by majority
+            # vote (robust to a single mistagged file) and capture per-track disc.
+            metas = []
+            for f in files:
+                audio = File(str(f))
+                if audio is None:
+                    continue
+                alb, art, gen, yr = _meta_of(audio)
+                title, tnum, disc = _track_of(audio, f)
+                metas.append({'album': alb, 'artist': art, 'genre': gen, 'year': yr,
+                              'title': title, 'track': tnum, 'disc': disc, 'path': str(f)})
+            if not metas:
                 continue
-            
-            # Debug: print what we're getting
-            logger.debug(f"File type: {type(first_file)}")
-            logger.debug(f"File path: {files[0]}")
-            
-            # Extract metadata with better approach
-            album_title = None
-            artist = None
-            genre = None
-            year = None
-            
-            # Try to get tags based on file type
-            if hasattr(first_file, 'tags') and first_file.tags:
-                logger.debug(f"Available tags: {list(first_file.tags.keys())}")
-                
-                # For ID3 tags (MP3)
-                if hasattr(first_file.tags, 'getall'):
-                    album_vals = first_file.tags.getall('TALB')
-                    if album_vals:
-                        album_title = str(album_vals[0])
-                    
-                    artist_vals = first_file.tags.getall('TPE1') or first_file.tags.getall('TPE2')
-                    if artist_vals:
-                        artist = str(artist_vals[0])
-                    
-                    genre_vals = first_file.tags.getall('TCON')
-                    if genre_vals:
-                        genre = str(genre_vals[0])
-                    
-                    year_vals = first_file.tags.getall('TDRC')
-                    if year_vals:
-                        try:
-                            year = int(str(year_vals[0])[:4])
-                        except:
-                            pass
-                
-                # For Vorbis Comments (FLAC, OGG) and MP4
-                else:
-                    # Try dictionary-style access
-                    for album_key in ['album', 'ALBUM', 'Album', '\xa9alb']:
-                        if album_key in first_file.tags:
-                            val = first_file.tags[album_key]
-                            album_title = str(val[0]) if isinstance(val, list) else str(val)
-                            break
-                    
-                    for artist_key in ['artist', 'ARTIST', 'Artist', 'albumartist', 'ALBUMARTIST', '\xa9ART', 'aART']:
-                        if artist_key in first_file.tags:
-                            val = first_file.tags[artist_key]
-                            artist = str(val[0]) if isinstance(val, list) else str(val)
-                            break
-                    
-                    for genre_key in ['genre', 'GENRE', 'Genre', '\xa9gen']:
-                        if genre_key in first_file.tags:
-                            val = first_file.tags[genre_key]
-                            genre = str(val[0]) if isinstance(val, list) else str(val)
-                            break
-                    
-                    for year_key in ['date', 'DATE', 'Date', 'year', 'YEAR', '\xa9day']:
-                        if year_key in first_file.tags:
-                            val = first_file.tags[year_key]
-                            year_str = str(val[0]) if isinstance(val, list) else str(val)
-                            try:
-                                year = int(year_str[:4])
-                            except:
-                                pass
-                            break
-            
-            # Try info attribute as fallback
-            if not album_title and hasattr(first_file, 'info'):
-                if hasattr(first_file.info, 'album'):
-                    album_title = first_file.info.album
-            
-            # Fallbacks
-            if not album_title:
-                album_title = album_dir.name
-            if not artist:
-                artist = 'Unknown Artist'
-            if not genre:
-                genre = 'Unknown'
-            
+
+            album_title = _majority(m['album'] for m in metas) or album_dir.name
+            artist = _majority(m['artist'] for m in metas) or 'Unknown Artist'
+            genre = _majority(m['genre'] for m in metas) or 'Unknown'
+            year = _majority(m['year'] for m in metas)
+
             logger.info(f"[{processed}/{len(albums)}] Indexing: {artist} - {album_title}")
-            
-            # Cover art: embedded first, then a folder image, then online lookup
+
+            # Cover art: embedded (first file) first, then a folder image, then online
             cover_art = get_cover_art(str(files[0]))
             if not cover_art:
                 cover_art = get_folder_art(album_dir)
@@ -380,65 +442,24 @@ def scan_music_library(full=False):
                 updated += 1
                 c.execute('''UPDATE albums SET title=?, artist=?, genre=?, year=?,
                             cover_art=?, track_count=?, scan_sig=? WHERE id=?''',
-                         (album_title, artist, genre, year, cover_art, len(files), signature, album_id))
+                         (album_title, artist, genre, year, cover_art, len(metas), signature, album_id))
                 # Drop stale tracks so removed/renamed files don't linger
                 c.execute('DELETE FROM tracks WHERE album_id=?', (album_id,))
             else:
                 added += 1
                 c.execute('''INSERT INTO albums (title, artist, genre, year, path, cover_art, track_count, scan_sig)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-                         (album_title, artist, genre, year, str(album_dir), cover_art, len(files), signature))
+                         (album_title, artist, genre, year, str(album_dir), cover_art, len(metas), signature))
                 album_id = c.lastrowid
 
-            # Add tracks
-            for track_file in files:
-                track_audio = File(str(track_file))
-                if track_audio:
-                    track_title = track_file.name
-                    track_num = 0
-                    
-                    if hasattr(track_audio, 'tags') and track_audio.tags:
-                        # Get track title
-                        if hasattr(track_audio.tags, 'getall'):
-                            title_vals = track_audio.tags.getall('TIT2')
-                            if title_vals:
-                                track_title = str(title_vals[0])
-                            
-                            num_vals = track_audio.tags.getall('TRCK')
-                            if num_vals:
-                                track_num_str = str(num_vals[0])
-                                try:
-                                    track_num = int(track_num_str.split('/')[0])
-                                except:
-                                    pass
-                        else:
-                            for title_key in ['title', 'TITLE', 'Title', '\xa9nam']:
-                                if title_key in track_audio.tags:
-                                    val = track_audio.tags[title_key]
-                                    track_title = str(val[0]) if isinstance(val, list) else str(val)
-                                    break
-                            
-                            for num_key in ['tracknumber', 'TRACKNUMBER', 'trkn']:
-                                if num_key in track_audio.tags:
-                                    val = track_audio.tags[num_key]
-                                    track_num_val = val[0] if isinstance(val, list) else val
-                                    # Handle tuple format from MP4
-                                    if isinstance(track_num_val, tuple):
-                                        track_num = track_num_val[0]
-                                    else:
-                                        try:
-                                            track_num_str = str(track_num_val)
-                                            track_num = int(track_num_str.split('/')[0])
-                                        except:
-                                            pass
-                                    break
-                    
-                    c.execute('''INSERT OR REPLACE INTO tracks (album_id, track_number, title, path)
-                                VALUES (?, ?, ?, ?)''',
-                             (album_id, track_num, track_title, str(track_file)))
-            
+            # Add tracks (disc_number lets multi-disc albums order correctly)
+            for m in metas:
+                c.execute('''INSERT OR REPLACE INTO tracks (album_id, track_number, disc_number, title, path)
+                            VALUES (?, ?, ?, ?, ?)''',
+                         (album_id, m['track'], m['disc'], m['title'], m['path']))
+
             conn.commit()
-            
+
         except Exception as e:
             logger.error(f"Error processing album {album_dir}: {e}")
             continue
@@ -452,16 +473,22 @@ def scan_music_library(full=False):
             removed += 1
     conn.commit()
 
+    # Fold multi-disc releases that live in separate folders into one album
+    merged = consolidate_multidisc(c)
+    conn.commit()
+
     conn.close()
     logger.info(
         f"Music library scan complete "
-        f"({added} added, {updated} updated, {skipped} unchanged, {removed} removed)"
+        f"({added} added, {updated} updated, {skipped} unchanged, "
+        f"{removed} removed, {merged} disc-folders merged)"
     )
     return {
         'added': added,
         'updated': updated,
         'skipped': skipped,
         'removed': removed,
+        'merged': merged,
         'total_albums': len(albums),
     }
 
@@ -723,8 +750,8 @@ def get_album_tracks(album_id):
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     
-    c.execute('''SELECT * FROM tracks WHERE album_id = ? 
-                 ORDER BY track_number''', (album_id,))
+    c.execute('''SELECT * FROM tracks WHERE album_id = ?
+                 ORDER BY disc_number, track_number''', (album_id,))
     tracks = [dict(row) for row in c.fetchall()]
     
     conn.close()
