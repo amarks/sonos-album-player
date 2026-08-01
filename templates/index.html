@@ -775,6 +775,63 @@
 
         .add-to-queue-btn:hover { opacity: 0.85; }
 
+        /* ── Hover preview card ──────────────────── */
+        .hovercard {
+            position: fixed;
+            z-index: 900;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.6);
+            padding: 12px;
+            pointer-events: none;
+            opacity: 0;
+            transform: translateY(4px);
+            transition: opacity 0.14s ease, transform 0.14s ease;
+            display: none;
+        }
+        .hovercard.show { opacity: 1; transform: translateY(0); }
+
+        .hovercard-cover {
+            width: 240px;
+            height: 240px;
+            border-radius: 8px;
+            object-fit: cover;
+            display: block;
+            background: var(--surface-2);
+        }
+        .hovercard-title {
+            font-size: 15px;
+            font-weight: 700;
+            color: var(--text);
+            margin-top: 10px;
+            max-width: 240px;
+            line-height: 1.25;
+        }
+        .hovercard-sub  { font-size: 13px; color: var(--text-2); margin-top: 3px; max-width: 240px; }
+        .hovercard-meta { font-size: 12px; color: var(--text-3); margin-top: 5px; }
+
+        .hovercard-tracks-head {
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--text);
+            padding: 0 2px 8px;
+            max-width: 300px;
+        }
+        .hovercard-tracks { list-style: none; min-width: 220px; max-width: 320px; }
+        .hovercard-tracks li {
+            display: flex;
+            gap: 10px;
+            align-items: baseline;
+            padding: 5px 2px;
+            font-size: 12.5px;
+            color: var(--text);
+            border-top: 1px solid var(--border);
+        }
+        .hovercard-tracks li:first-child { border-top: none; }
+        .hovercard-tracks .tn { color: var(--text-3); width: 20px; text-align: right; flex-shrink: 0; }
+        .hovercard-more { font-size: 12px; color: var(--text-3); padding: 7px 2px 0; }
+
         /* ── Scrollbars ──────────────────────────── */
         ::-webkit-scrollbar { width: 5px; height: 5px; }
         ::-webkit-scrollbar-track { background: transparent; }
@@ -968,6 +1025,9 @@
                    onblur="onVolumeLabelBlur(this.value)">
         </div>
     </div>
+
+    <!-- Hover preview (album cover / queue tracks) -->
+    <div class="hovercard" id="hovercard"></div>
 
     <!-- Modal -->
     <div class="modal-overlay" id="modalOverlay" onclick="closeModal(event)">
@@ -1428,6 +1488,7 @@
     async function showAlbumDetails(albumId) {
         const album = filteredAlbums.find(a => a.id === albumId) || albums.find(a => a.id === albumId);
         if (!album) return;
+        hideHover();
         currentModalAlbum = album;
 
         const img = artSrc(album.cover_art);
@@ -1587,6 +1648,116 @@
             console.error('Background rescan failed:', e);
         }
     }
+
+    // ── Hover previews (album cover + queue tracks) ───────────────────────
+    const trackCache = {};
+    let hoverTimer = null, hoverKey = null, isDragging = false;
+
+    async function getTracksCached(id) {
+        if (trackCache[id]) return trackCache[id];
+        try {
+            const t = await (await fetch(`/api/albums/${id}/tracks`)).json();
+            trackCache[id] = t;
+            return t;
+        } catch (e) { return []; }
+    }
+
+    function placeHover(rect, forceLeft) {
+        const hc = document.getElementById('hovercard');
+        hc.style.display = 'block';               // make measurable
+        const w = hc.offsetWidth, h = hc.offsetHeight, m = 10;
+        const vw = innerWidth, vh = innerHeight;
+        const roomRight = (vw - rect.right - m) >= w;
+        let x;
+        if (!forceLeft && roomRight)        x = rect.right + m;
+        else if ((rect.left - m) >= w)      x = rect.left - m - w;
+        else                                x = roomRight ? rect.right + m : m;
+        x = Math.max(m, Math.min(x, vw - w - m));
+        let y = rect.top + rect.height / 2 - h / 2;
+        y = Math.max(m, Math.min(y, vh - h - m));
+        hc.style.left = x + 'px';
+        hc.style.top  = y + 'px';
+        requestAnimationFrame(() => hc.classList.add('show'));
+    }
+
+    function hideHover() {
+        clearTimeout(hoverTimer); hoverTimer = null; hoverKey = null;
+        const hc = document.getElementById('hovercard');
+        hc.classList.remove('show');
+        setTimeout(() => { if (!hc.classList.contains('show')) hc.style.display = 'none'; }, 160);
+    }
+
+    function scheduleAlbumHover(card) {
+        if (isDragging) return;
+        const id = parseInt(card.dataset.albumId);
+        if (hoverKey === 'a' + id) return;
+        clearTimeout(hoverTimer);
+        hoverTimer = setTimeout(() => {
+            const album = albums.find(a => a.id === id);
+            if (!album) return;
+            hoverKey = 'a' + id;
+            const art  = album.cover_art || artCache[id];
+            const meta = [album.genre, album.year, album.track_count ? album.track_count + ' tracks' : '']
+                .filter(Boolean).map(esc).join('  ·  ');
+            const hc = document.getElementById('hovercard');
+            hc.innerHTML =
+                (art ? `<img class="hovercard-cover" src="${artSrc(art)}" alt="">`
+                     : `<div class="hovercard-cover"></div>`) +
+                `<div class="hovercard-title">${esc(album.title)}</div>` +
+                `<div class="hovercard-sub">${esc(album.artist || 'Unknown Artist')}</div>` +
+                (meta ? `<div class="hovercard-meta">${meta}</div>` : '');
+            placeHover(card.getBoundingClientRect(), false);
+        }, 350);
+    }
+
+    function scheduleQueueHover(item) {
+        if (isDragging) return;
+        const idx = parseInt(item.dataset.queueIndex);
+        const album = queue[idx];
+        if (!album) return;
+        if (hoverKey === 'q' + album.id) return;
+        clearTimeout(hoverTimer);
+        hoverTimer = setTimeout(async () => {
+            const key = 'q' + album.id;
+            hoverKey = key;
+            const tracks = await getTracksCached(album.id);
+            if (hoverKey !== key) return;         // moved away while fetching
+            const shown = tracks.slice(0, 18);
+            const more  = tracks.length - shown.length;
+            const hc = document.getElementById('hovercard');
+            hc.innerHTML =
+                `<div class="hovercard-tracks-head">${esc(album.title)}</div>` +
+                `<ul class="hovercard-tracks">` +
+                shown.map(t => `<li><span class="tn">${t.track_number || '·'}</span><span>${esc(t.title)}</span></li>`).join('') +
+                `</ul>` +
+                (more > 0 ? `<div class="hovercard-more">+ ${more} more</div>` : '');
+            const el = document.querySelector(`.queue-item[data-queue-index="${idx}"]`);
+            placeHover((el || item).getBoundingClientRect(), false);
+        }, 350);
+    }
+
+    // Only wire hover previews on devices that actually hover (skip touch)
+    if (window.matchMedia && window.matchMedia('(hover: hover)').matches) {
+        const grid = document.getElementById('albumsGrid');
+        grid.addEventListener('mouseover', e => {
+            const c = e.target.closest('.album-card');
+            if (c) scheduleAlbumHover(c); else hideHover();
+        });
+        grid.addEventListener('mouseleave', hideHover);
+
+        const qlist = document.getElementById('queueList');
+        qlist.addEventListener('mouseover', e => {
+            const it = e.target.closest('.queue-item');
+            if (it) scheduleQueueHover(it); else hideHover();
+        });
+        qlist.addEventListener('mouseleave', hideHover);
+
+        document.querySelector('.albums-section').addEventListener('scroll', hideHover, { passive: true });
+        qlist.addEventListener('scroll', hideHover, { passive: true });
+    }
+
+    document.addEventListener('dragstart', () => { isDragging = true; hideHover(); });
+    document.addEventListener('dragend',   () => { isDragging = false; });
 
     // ── Init ──────────────────────────────────────────────────────────────
     loadAlbums();
