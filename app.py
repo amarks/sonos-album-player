@@ -22,12 +22,31 @@ from mutagen.mp4 import MP4
 import soco
 from soco.exceptions import SoCoException
 import logging
+from logging.handlers import RotatingFileHandler
 
 app = Flask(__name__)
 CORS(app)
 app.config['TEMPLATES_AUTO_RELOAD'] = True  # pick up index.html edits without a restart
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def setup_file_logging():
+    """Add a rotating file handler so logs survive after the launching shell dies.
+
+    The app is normally started detached from an SSH session; without this, stdout/
+    stderr point at a socket that closes when that session ends and all logs are lost.
+    """
+    try:
+        log_dir = os.path.dirname(os.path.abspath(config.get('database_path', '.'))) or '.'
+        log_path = os.path.join(log_dir, 'app.log')
+        handler = RotatingFileHandler(log_path, maxBytes=2_000_000, backupCount=5)
+        handler.setFormatter(logging.Formatter(
+            '%(asctime)s %(levelname)s [%(name)s] %(message)s'))
+        logging.getLogger().addHandler(handler)
+        logger.info(f"File logging enabled: {log_path}")
+    except Exception as e:
+        logger.warning(f"Could not enable file logging: {e}")
 
 # Load configuration
 CONFIG_FILE = 'config.json'
@@ -767,77 +786,80 @@ def get_album_tracks(album_id):
     conn.close()
     return jsonify(tracks)
 
+def _add_album_tracks(sonos, album_id):
+    """Resolve an album in the Sonos library and append its tracks to the queue.
+
+    Returns (tracks_added, error) where error is None on success or an
+    (payload_dict, http_status) tuple describing why the album couldn't be added.
+    Raises on unexpected Sonos/SOAP errors so callers can log with a traceback.
+    """
+    conn = sqlite3.connect(config['database_path'])
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute('''SELECT title, artist FROM albums WHERE id = ?''', (album_id,))
+    album_info = c.fetchone()
+    conn.close()
+
+    if not album_info:
+        return 0, ({'error': 'Album not found', 'album_id': album_id}, 404)
+
+    album_title = album_info['title']
+    artist = album_info['artist']
+
+    # Search for album in Sonos music library
+    logger.info(f"Searching Sonos library for: {artist} - {album_title}")
+    results = sonos.music_library.get_albums(search_term=album_title)
+    logger.info(f"Found {len(results)} results")
+
+    # Find the best match
+    album_item = None
+    for result in results:
+        logger.info(f"  Result: {result.creator} - {result.title}")
+        if album_title.lower() in result.title.lower():
+            if artist and artist.lower() in result.creator.lower():
+                album_item = result
+                logger.info(f"  ✓ Matched on title and artist")
+                break
+            elif not album_item:  # Keep first title match as fallback
+                album_item = result
+                logger.info(f"  ~ Partial match on title only")
+
+    if not album_item:
+        logger.warning(f"Album not found in Sonos library: {artist} - {album_title}")
+        return 0, ({'error': 'Album not found in Sonos library',
+                    'album': album_title,
+                    'artist': artist,
+                    'suggestion': 'Make sure Sonos has indexed this music'}, 404)
+
+    # Browse the album and append every track
+    logger.info(f"Adding album to queue: {album_item.item_id}")
+    tracks = sonos.music_library.browse(album_item)
+    tracks_added = 0
+    for track in tracks:
+        logger.info(f"  Adding track: {track.title}")
+        sonos.add_to_queue(track)
+        tracks_added += 1
+    logger.info(f"Added {tracks_added} tracks from '{album_title}' to queue")
+    return tracks_added, None
+
+
 @app.route('/api/queue/add/<int:album_id>', methods=['POST'])
 def add_to_queue(album_id):
     """Add album to Sonos queue using music library search"""
     sonos = get_sonos_controller()
     if not sonos:
         return jsonify({'error': 'Cannot connect to Sonos'}), 500
-    
-    conn = sqlite3.connect(config['database_path'])
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    
-    # Get album info
-    c.execute('''SELECT title, artist FROM albums WHERE id = ?''', (album_id,))
-    album_info = c.fetchone()
-    
-    if not album_info:
-        conn.close()
-        return jsonify({'error': 'Album not found'}), 404
-    
-    album_title = album_info['title']
-    artist = album_info['artist']
-    conn.close()
-    
+
     try:
-        # Search for album in Sonos music library
-        logger.info(f"Searching Sonos library for: {artist} - {album_title}")
-        results = sonos.music_library.get_albums(search_term=album_title)
-        
-        logger.info(f"Found {len(results)} results")
-        
-        # Find the best match
-        album_item = None
-        for result in results:
-            logger.info(f"  Result: {result.creator} - {result.title}")
-            # Try to match both title and artist
-            if album_title.lower() in result.title.lower():
-                if artist and artist.lower() in result.creator.lower():
-                    album_item = result
-                    logger.info(f"  ✓ Matched on title and artist")
-                    break
-                elif not album_item:  # Keep first title match as fallback
-                    album_item = result
-                    logger.info(f"  ~ Partial match on title only")
-        
-        if not album_item:
-            logger.warning(f"Album not found in Sonos library: {artist} - {album_title}")
-            return jsonify({'error': 'Album not found in Sonos library', 
-                          'album': album_title,
-                          'artist': artist,
-                          'suggestion': 'Make sure Sonos has indexed this music'}), 404
-        
-        # Add all tracks from the album to queue
-        logger.info(f"Adding album to queue: {album_item.item_id}")
-        
-        # Browse the album to get its tracks
-        tracks = sonos.music_library.browse(album_item)
-        
-        tracks_added = 0
-        for track in tracks:
-            logger.info(f"  Adding track: {track.title}")
-            sonos.add_to_queue(track)
-            tracks_added += 1
-        
-        logger.info(f"Added {tracks_added} tracks from '{album_title}' to queue")
-        
-        # Get current queue length to help debug
+        tracks_added, error = _add_album_tracks(sonos, album_id)
+        if error:
+            payload, status = error
+            return jsonify(payload), status
+
         queue_info = sonos.get_queue()
         logger.info(f"Queue now has {len(queue_info)} items")
-        
-        return jsonify({'success': True, 'tracks_added': tracks_added, 'queue_length': len(queue_info)})
-        
+        return jsonify({'success': True, 'tracks_added': tracks_added,
+                        'queue_length': len(queue_info)})
     except Exception as e:
         logger.error(f"Error adding album to queue: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
@@ -856,30 +878,97 @@ def clear_queue():
         logger.error(f"Error clearing queue: {e}")
         return jsonify({'error': str(e)}), 500
 
+def _saved_queue_albums():
+    """The sidebar queue as an ordered list of {id, title, artist} dicts."""
+    conn = sqlite3.connect(config['database_path'])
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    queue_key = f"queue_{config.get('sonos_ip', 'default')}"
+    c.execute('SELECT value FROM settings WHERE key = ?', (queue_key,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return []
+    try:
+        ids = json.loads(row['value'])
+    except Exception:
+        ids = []
+    if not ids:
+        conn.close()
+        return []
+    placeholders = ','.join('?' * len(ids))
+    c.execute(f'SELECT id, title, artist FROM albums WHERE id IN ({placeholders})', ids)
+    by_id = {r['id']: dict(r) for r in c.fetchall()}
+    conn.close()
+    return [by_id[i] for i in ids if i in by_id]
+
+
+def _sonos_queue_album_runs(sonos):
+    """Collapse the flat Sonos queue into its sequence of album titles (one per run)."""
+    runs, last = [], object()
+    for t in sonos.get_queue(max_items=1000):
+        alb = (getattr(t, 'album', None) or '').strip()
+        if alb != last:
+            runs.append(alb)
+            last = alb
+    return runs
+
+
+def _queue_matches_sidebar(sonos):
+    """True only when we're confident the Sonos queue already matches the sidebar.
+
+    Compares the ordered album runs in the Sonos queue against the saved sidebar
+    order with a lenient title match. Errs toward False (rebuild) when unsure —
+    rebuilding is always safe, silently playing the wrong queue is not.
+    """
+    saved = _saved_queue_albums()
+    if not saved:
+        return True  # nothing saved to reconcile against
+    runs = _sonos_queue_album_runs(sonos)
+    if len(runs) != len(saved):
+        return False
+    for want, got in zip(saved, runs):
+        wt = (want.get('title') or '').lower()
+        gt = (got or '').lower()
+        if not wt or (wt not in gt and gt not in wt):
+            return False
+    return True
+
+
 @app.route('/api/queue/play', methods=['POST'])
 def play_queue():
-    """Stop current source and play from queue"""
+    """Play from the queue, first rebuilding the Sonos queue if it has drifted
+    from the sidebar (e.g. an earlier add failed, or Sonos was touched elsewhere)."""
     sonos = get_sonos_controller()
     if not sonos:
         return jsonify({'error': 'Cannot connect to Sonos'}), 500
-    
+
     try:
-        # Get the queue
+        rebuilt = False
+        if not _queue_matches_sidebar(sonos):
+            saved = _saved_queue_albums()
+            logger.warning(
+                f"Sonos queue diverges from sidebar ({len(saved)} album(s) saved); rebuilding")
+            sonos.clear_queue()
+            for a in saved:
+                added, error = _add_album_tracks(sonos, a['id'])
+                if error:
+                    logger.warning(
+                        f"Reconcile: could not add album {a['id']} "
+                        f"({a.get('title')}): {error[0]}")
+            rebuilt = True
+
         queue = sonos.get_queue()
-        
         if len(queue) == 0:
             return jsonify({'error': 'Queue is empty'}), 400
-        
-        # Stop current playback
+
         sonos.stop()
-        
-        # Play from queue (track 0 is the first track)
         sonos.play_from_queue(0)
-        
-        logger.info(f"Started playing queue with {len(queue)} tracks")
-        return jsonify({'success': True, 'queue_length': len(queue)})
+
+        logger.info(f"Started playing queue with {len(queue)} tracks (rebuilt={rebuilt})")
+        return jsonify({'success': True, 'queue_length': len(queue), 'rebuilt': rebuilt})
     except Exception as e:
-        logger.error(f"Error playing queue: {e}")
+        logger.error(f"Error playing queue: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/player/play', methods=['POST'])
@@ -924,6 +1013,64 @@ def previous_track():
         sonos.previous()
         return jsonify({'success': True})
     except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+def _album_run_starts(sonos):
+    """0-based queue indices where each album run begins, e.g. [0, 11]."""
+    starts, last = [], object()
+    for i, t in enumerate(sonos.get_queue(max_items=1000)):
+        alb = (getattr(t, 'album', None) or '').strip()
+        if alb != last:
+            starts.append(i)
+            last = alb
+    return starts
+
+
+def _current_queue_index(sonos):
+    """0-based index of the currently selected queue track (0 if unknown)."""
+    p = sonos.get_current_track_info().get('playlist_position')
+    try:
+        return max(0, int(p) - 1)
+    except (TypeError, ValueError):
+        return 0
+
+
+@app.route('/api/player/next_album', methods=['POST'])
+def next_album():
+    """Jump to the first track of the next album in the queue."""
+    sonos = get_sonos_controller()
+    if not sonos:
+        return jsonify({'error': 'Cannot connect to Sonos'}), 500
+    try:
+        starts = _album_run_starts(sonos)
+        cur = _current_queue_index(sonos)
+        run = max((i for i, s in enumerate(starts) if s <= cur), default=0)
+        if run + 1 < len(starts):
+            sonos.play_from_queue(starts[run + 1])
+            return jsonify({'success': True, 'index': starts[run + 1]})
+        return jsonify({'success': True, 'index': cur, 'at_end': True})
+    except Exception as e:
+        logger.error(f"Error jumping to next album: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/player/prev_album', methods=['POST'])
+def prev_album():
+    """Jump to the previous album — or restart the current one if mid-album."""
+    sonos = get_sonos_controller()
+    if not sonos:
+        return jsonify({'error': 'Cannot connect to Sonos'}), 500
+    try:
+        starts = _album_run_starts(sonos)
+        cur = _current_queue_index(sonos)
+        run = max((i for i, s in enumerate(starts) if s <= cur), default=0)
+        # Mid-album → restart current album; already at its start → previous album
+        target = starts[run] if cur > starts[run] else starts[max(0, run - 1)]
+        sonos.play_from_queue(target)
+        return jsonify({'success': True, 'index': target})
+    except Exception as e:
+        logger.error(f"Error jumping to previous album: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/queue/state', methods=['GET', 'POST'])
@@ -1027,6 +1174,7 @@ def backfill_art():
 
 if __name__ == '__main__':
     config = load_config()
+    setup_file_logging()
 
     # Always run init so new tables/indexes are created if missing
     init_db()
