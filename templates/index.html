@@ -35,19 +35,24 @@
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
+        html, body { overflow-x: hidden; max-width: 100%; }
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             background: var(--bg);
             color: var(--text);
             height: 100vh;
+            height: 100dvh;      /* track the actually-visible viewport (mobile Safari toolbars) */
             overflow: hidden;
         }
 
         .container {
             display: grid;
-            grid-template-columns: 260px 1fr;
+            grid-template-columns: 260px minmax(0, 1fr);
             grid-template-rows: 54px 1fr 88px;
             height: 100vh;
+            height: 100dvh;
+            max-width: 100%;
         }
 
         /* ── Header ──────────────────────────────── */
@@ -367,6 +372,8 @@
         /* ── Albums section ──────────────────────── */
         .albums-section {
             overflow-y: auto;
+            overflow-x: hidden;
+            min-width: 0;
             background: var(--bg);
         }
 
@@ -935,8 +942,22 @@
         /* ── Mobile layout ────────────────────────── */
         @media (max-width: 700px) {
             .container {
-                grid-template-columns: 1fr;
+                /* minmax(0,1fr) — NOT plain 1fr — so the column can't grow past
+                   the viewport when a child's min-content is wide. Plain 1fr let
+                   the whole shell overflow, pushing the speaker picker off-screen
+                   and shifting the (centered) transport controls right. */
+                grid-template-columns: minmax(0, 1fr);
+                /* Header + player size to their content; the grid (not a fixed
+                   88px row) is what keeps the transport controls on-screen. */
+                grid-template-rows: auto 1fr auto;
             }
+
+            /* Spanning rows must never exceed the viewport either */
+            .header, .player-controls { min-width: 0; max-width: 100%; }
+            .player-controls { overflow: hidden; }
+
+            /* Notch / status-bar inset when launched as a standalone PWA */
+            .header { padding-top: env(safe-area-inset-top); }
 
             /* Queue becomes a slide-in panel */
             .queue-section {
@@ -970,7 +991,7 @@
 
             /* Player bar: stack now-playing above controls */
             .player-controls {
-                grid-template-columns: 1fr;
+                grid-template-columns: minmax(0, 1fr);
                 grid-template-rows: auto auto;
                 padding: 10px max(16px, env(safe-area-inset-right)) max(10px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
                 gap: 8px;
@@ -986,9 +1007,21 @@
             .np-art { width: 40px; height: 40px; }
         }
 
+        /* Keep the speaker name from pushing the header past the viewport */
+        @media (max-width: 480px) {
+            #speakerName {
+                display: inline-block;
+                max-width: 5.5em;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                vertical-align: middle;
+            }
+        }
+
         @media (max-width: 400px) {
             .sort-controls { display: none; }
-            .albums-grid { grid-template-columns: repeat(2, 1fr); }
+            .albums-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
     </style>
 </head>
