@@ -128,6 +128,16 @@
 
         .speaker-btn:hover { background: var(--surface-3); }
 
+        /* Keep a long group name from squeezing the search box */
+        #speakerName {
+            display: inline-block;
+            max-width: 14em;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            vertical-align: middle;
+        }
+
         .speaker-menu {
             position: absolute;
             right: 0;
@@ -1009,14 +1019,7 @@
 
         /* Keep the speaker name from pushing the header past the viewport */
         @media (max-width: 480px) {
-            #speakerName {
-                display: inline-block;
-                max-width: 5.5em;
-                overflow: hidden;
-                text-overflow: ellipsis;
-                white-space: nowrap;
-                vertical-align: middle;
-            }
+            #speakerName { max-width: 5.5em; }
         }
 
         @media (max-width: 400px) {
@@ -1630,7 +1633,7 @@
             const active = speakerList.find(s => s.selected);
             if (active) {
                 currentSpeakerIp = active.coordinator_ip;
-                document.getElementById('speakerName').textContent = active.label;
+                setSpeakerLabel(active);
             }
             const menu = document.getElementById('speakerMenu');
             menu.innerHTML = speakerList.map(s => {
@@ -1640,7 +1643,7 @@
                 return `
                 <div class="speaker-option ${s.selected ? 'active' : ''}"
                      data-coordinator-ip="${s.coordinator_ip}"
-                     onclick="selectSpeaker('${s.coordinator_ip}', '${esc(s.label)}')">
+                     onclick="selectSpeaker('${s.coordinator_ip}')">
                     <div class="speaker-option-text">
                         <span>${esc(s.label)}</span>
                         ${subtitle}
@@ -1653,9 +1656,18 @@
         }
     }
 
-    async function selectSpeaker(ip, name) {
+    // Compact button label: "Living Room +2" (full name shown on hover via title)
+    function setSpeakerLabel(s) {
+        const el = document.getElementById('speakerName');
+        const parts = (s.label || '').split(' + ');
+        el.textContent = parts.length > 1 ? `${parts[0]} +${parts.length - 1}` : s.label;
+        el.parentElement.title = s.label;
+    }
+
+    async function selectSpeaker(ip) {
         document.getElementById('speakerMenu').classList.remove('open');
-        document.getElementById('speakerName').textContent = name;
+        const s = speakerList.find(sp => sp.coordinator_ip === ip);
+        if (s) setSpeakerLabel(s);
         currentSpeakerIp = ip;
         document.querySelectorAll('.speaker-option').forEach(el => {
             el.classList.toggle('active', el.dataset.coordinatorIp === ip);
