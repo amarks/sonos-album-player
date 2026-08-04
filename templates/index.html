@@ -1409,8 +1409,18 @@
     async function removeFromQueue(index) {
         queue.splice(index, 1);
         renderQueue();
+        // Remove just this album's tracks from Sonos in place (preserves the
+        // currently-playing track). Must hit the endpoint before saveQueueState
+        // so the server still sees the pre-removal sidebar order for its guard.
+        let removed = false;
+        try {
+            const res = await fetch(`/api/queue/remove/${index}`, { method: 'POST' });
+            removed = res.ok;
+        } catch (e) { console.error(e); }
+        // Only if the surgical remove failed (queue drifted) do we rebuild,
+        // which restarts playback — the lesser evil versus a wrong queue.
+        if (!removed) await resyncSonosQueue();
         saveQueueState();
-        await resyncSonosQueue();
     }
 
     function saveQueueState() {
@@ -1725,8 +1735,9 @@
 
     async function addModalAlbumToQueue() {
         if (!currentModalAlbum) return;
+        const albumId = currentModalAlbum.id;
         closeModal();
-        await addAlbumToQueue(currentModalAlbum.id, null);
+        await addAlbumToQueue(albumId, null);
     }
 
     document.addEventListener('keydown', e => {
