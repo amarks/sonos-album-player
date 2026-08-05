@@ -1,4 +1,4 @@
-const CACHE = 'sonos-player-v1';
+const CACHE = 'sonos-player-v5';
 
 // Cache only the shell assets; API responses are always network-first
 const PRECACHE = ['/', '/static/icons/apple-touch-icon.png'];

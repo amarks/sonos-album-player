@@ -822,6 +822,20 @@
 
         .track-title { font-size: 14px; color: var(--text); flex: 1; }
 
+        /* Remove button shown in the modal's queue mode (tap target for touch). */
+        .track-remove {
+            margin-left: auto;
+            width: 28px; height: 28px;
+            flex-shrink: 0;
+            border: none; border-radius: 50%;
+            background: var(--surface-3);
+            color: white;
+            cursor: pointer;
+            font-size: 17px; line-height: 1;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .track-remove:hover, .track-remove:active { background: var(--danger); }
+
         .modal-footer {
             padding: 14px 22px;
             border-top: 1px solid var(--border);
@@ -863,6 +877,9 @@
             display: none;
         }
         .hovercard.show { opacity: 1; transform: translateY(0); }
+        /* Only the queue popup is interactive (hover to keep open, remove tracks);
+           album-grid previews stay click-through so they don't block the grid. */
+        .hovercard.interactive { pointer-events: auto; }
 
         .hovercard-cover {
             width: 240px;
@@ -894,7 +911,7 @@
         .hovercard-tracks li {
             display: flex;
             gap: 10px;
-            align-items: baseline;
+            align-items: center;
             padding: 5px 2px;
             font-size: 12.5px;
             color: var(--text);
@@ -902,6 +919,31 @@
         }
         .hovercard-tracks li:first-child { border-top: none; }
         .hovercard-tracks .tn { color: var(--text-3); width: 20px; text-align: right; flex-shrink: 0; }
+        .hovercard-tracks .tt {
+            flex: 1; min-width: 0;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .hc-remove {
+            margin-left: auto;
+            width: 18px; height: 18px;
+            flex-shrink: 0;
+            border: none; border-radius: 50%;
+            background: transparent;
+            color: var(--text-3);
+            cursor: pointer;
+            font-size: 15px; line-height: 1;
+            display: flex; align-items: center; justify-content: center;
+            opacity: 0;
+            /* No transition: a fade-out leaves buttons briefly red/visible after
+               the pointer moves on, which reads as "previous rows stay lit". The
+               highlight must track the pointer instantly. */
+        }
+        /* Highlight is driven entirely by JS-managed classes (.hot / .hot-btn),
+           never CSS :hover. Inside the hovercard's composited layer (transform/
+           opacity transition) Safari leaves :hover stuck on rows/buttons the
+           pointer has already left, so we recompute on every mousemove instead. */
+        .hovercard-tracks li.hot .hc-remove { opacity: 1; }
+        .hc-remove.hot-btn { background: var(--danger); color: white; }
         .hovercard-more { font-size: 12px; color: var(--text-3); padding: 7px 2px 0; }
 
         /* ── Scrollbars ──────────────────────────── */
@@ -1148,7 +1190,7 @@
             </div>
             <div class="modal-footer">
                 <span id="trackCount"></span>
-                <button class="add-to-queue-btn" onclick="addModalAlbumToQueue()">Add to Queue</button>
+                <button class="add-to-queue-btn" id="modalAddBtn" onclick="addModalAlbumToQueue()">Add to Queue</button>
             </div>
         </div>
     </div>
@@ -1163,7 +1205,8 @@
     let isPlaying      = false;
     let draggedAlbum   = null;
     let draggedQueueIndex = null;
-    let currentModalAlbum = null;
+    let currentModalAlbum = null;   // set in grid mode (enables "Add to Queue")
+    let modalQueueIdx = null;        // set in queue mode (tap a queue item on touch)
     let currentPlayingAlbum = null;
     let speakerList    = [];
     let currentSpeakerIp = '';
@@ -1347,6 +1390,7 @@
             return `
             <div class="queue-item ${playing ? 'now-playing' : ''}"
                  data-queue-index="${i}" draggable="true"
+                 onclick="showQueueDetails(${i})"
                  ondragstart="handleQueueDragStart(event)"
                  ondragend="handleQueueDragEnd(event)">
                 <div class="playing-indicator"></div>
@@ -1528,13 +1572,26 @@
     }
 
     async function moveQueueItem(from, to) {
-        const [item] = queue.splice(from, 1);
         const target = to > from ? to - 1 : to;
-        if (target === from) { queue.splice(from, 0, item); return; }  // dropped in place
+        if (target === from) return;                 // dropped in place, nothing to do
+        // Optimistic local reorder; defer saveQueueState until after the move so
+        // the server still sees the pre-move sidebar order for its drift guard.
+        const [item] = queue.splice(from, 1);
         queue.splice(target, 0, item);
         renderQueue();
+        // Reorder the Sonos queue in place (preserves playback + per-track removals).
+        let moved = false;
+        try {
+            const res = await fetch('/api/queue/move', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ from, to })
+            });
+            moved = res.ok;
+        } catch (e) { console.error(e); }
+        // Fall back to a full rebuild only if the in-place move failed (queue drifted).
+        if (!moved) await resyncSonosQueue();
         saveQueueState();
-        await resyncSonosQueue();
     }
 
     // ── Player controls ───────────────────────────────────────────────────
@@ -1706,6 +1763,8 @@
         if (!album) return;
         hideHover();
         currentModalAlbum = album;
+        modalQueueIdx = null;
+        document.getElementById('modalAddBtn').style.display = '';   // grid mode: allow adding
 
         const img = artSrc(album.cover_art);
         document.getElementById('modalCover').src    = img;
@@ -1726,10 +1785,65 @@
         } catch (e) { console.error(e); }
     }
 
+    // Tap a queue item (touch-friendly path to the tracklist + per-track remove).
+    async function showQueueDetails(idx) {
+        const album = queue[idx];
+        if (!album) return;
+        hideHover();
+        currentModalAlbum = null;
+        modalQueueIdx = idx;
+        document.getElementById('modalAddBtn').style.display = 'none';  // already queued
+
+        document.getElementById('modalCover').src = artSrc(album.cover_art || artCache[album.id]);
+        document.getElementById('modalTitle').textContent  = album.title;
+        document.getElementById('modalArtist').textContent = album.artist || 'Unknown Artist';
+        document.getElementById('modalGenre').textContent  = album.genre  || '';
+
+        await renderModalQueueTracks(idx);
+        document.getElementById('modalOverlay').classList.add('active');
+    }
+
+    async function renderModalQueueTracks(idx) {
+        let tracks = [];
+        try {
+            const data = await fetch(`/api/queue/album/${idx}/tracks`).then(r => r.json());
+            tracks = data.tracks || [];
+        } catch (e) { console.error(e); }
+        document.getElementById('trackList').innerHTML = tracks.map(t => `
+            <li class="track-item">
+                <span class="track-number">${t.number || '·'}</span>
+                <span class="track-title">${esc(t.title)}</span>
+                <button class="track-remove" title="Remove from queue"
+                        onclick="removeModalQueueTrack(${idx}, ${t.track_index})">&minus;</button>
+            </li>`).join('');
+        document.getElementById('trackCount').textContent =
+            `${tracks.length} track${tracks.length === 1 ? '' : 's'} in queue`;
+    }
+
+    async function removeModalQueueTrack(idx, trackIndex) {
+        let result;
+        try {
+            const res = await fetch(`/api/queue/album/${idx}/remove_track/${trackIndex}`,
+                                    { method: 'POST' });
+            if (!res.ok) { console.error('remove_track failed', res.status); return; }
+            result = await res.json();
+        } catch (e) { console.error(e); return; }
+
+        if (result.album_empty) {
+            queue.splice(idx, 1);
+            renderQueue();
+            saveQueueState();
+            closeModal();
+        } else {
+            renderModalQueueTracks(idx);   // re-fetch so indices stay correct
+        }
+    }
+
     function closeModal(event) {
         if (!event || event.target.id === 'modalOverlay') {
             document.getElementById('modalOverlay').classList.remove('active');
             currentModalAlbum = null;
+            modalQueueIdx = null;
         }
     }
 
@@ -1867,16 +1981,31 @@
     }
 
     // ── Hover previews (album cover + queue tracks) ───────────────────────
-    const trackCache = {};
-    let hoverTimer = null, hoverKey = null, isDragging = false;
+    let hoverTimer = null, hoverKey = null, isDragging = false, hideTimer = null;
 
-    async function getTracksCached(id) {
-        if (trackCache[id]) return trackCache[id];
-        try {
-            const t = await (await fetch(`/api/albums/${id}/tracks`)).json();
-            trackCache[id] = t;
-            return t;
-        } catch (e) { return []; }
+    // A short grace period before hiding lets the pointer travel from a queue
+    // item onto its (interactive) popup without the popup vanishing en route.
+    function cancelHide() { clearTimeout(hideTimer); hideTimer = null; }
+    function scheduleHide() { clearTimeout(hideTimer); hideTimer = setTimeout(hideHover, 160); }
+    function clearHotTrack() {
+        document.querySelectorAll('.hovercard-tracks li.hot')
+            .forEach(li => li.classList.remove('hot'));
+        document.querySelectorAll('.hc-remove.hot-btn')
+            .forEach(b => b.classList.remove('hot-btn'));
+    }
+
+    // Recompute the single highlighted row (and remove button) from the pointer's
+    // position. mousemove fires on every movement and is reliable in Safari, so
+    // stale highlights self-correct — unlike CSS :hover in a composited layer.
+    function updateHotTrack(target) {
+        const li  = target.closest ? target.closest('.hovercard-tracks li') : null;
+        const btn = target.closest ? target.closest('.hc-remove') : null;
+        document.querySelectorAll('.hovercard-tracks li.hot')
+            .forEach(l => { if (l !== li) l.classList.remove('hot'); });
+        if (li) li.classList.add('hot');
+        document.querySelectorAll('.hc-remove.hot-btn')
+            .forEach(b => { if (b !== btn) b.classList.remove('hot-btn'); });
+        if (btn) btn.classList.add('hot-btn');
     }
 
     function placeHover(rect, forceLeft) {
@@ -1899,13 +2028,20 @@
 
     function hideHover() {
         clearTimeout(hoverTimer); hoverTimer = null; hoverKey = null;
+        clearTimeout(hideTimer);  hideTimer  = null;
         const hc = document.getElementById('hovercard');
         hc.classList.remove('show');
-        setTimeout(() => { if (!hc.classList.contains('show')) hc.style.display = 'none'; }, 160);
+        setTimeout(() => {
+            if (!hc.classList.contains('show')) {
+                hc.style.display = 'none';
+                hc.classList.remove('interactive');
+            }
+        }, 160);
     }
 
     function scheduleAlbumHover(card) {
         if (isDragging) return;
+        cancelHide();
         const id = parseInt(card.dataset.albumId);
         if (hoverKey === 'a' + id) return;
         clearTimeout(hoverTimer);
@@ -1917,6 +2053,7 @@
             const meta = [album.genre, album.year, album.track_count ? album.track_count + ' tracks' : '']
                 .filter(Boolean).map(esc).join('  ·  ');
             const hc = document.getElementById('hovercard');
+            hc.classList.remove('interactive');
             hc.innerHTML =
                 (art ? `<img class="hovercard-cover" src="${artSrc(art)}" alt="">`
                      : `<div class="hovercard-cover"></div>`) +
@@ -1929,28 +2066,70 @@
 
     function scheduleQueueHover(item) {
         if (isDragging) return;
+        cancelHide();
         const idx = parseInt(item.dataset.queueIndex);
         const album = queue[idx];
         if (!album) return;
         if (hoverKey === 'q' + album.id) return;
         clearTimeout(hoverTimer);
-        hoverTimer = setTimeout(async () => {
-            const key = 'q' + album.id;
-            hoverKey = key;
-            const tracks = await getTracksCached(album.id);
-            if (hoverKey !== key) return;         // moved away while fetching
-            const shown = tracks.slice(0, 18);
-            const more  = tracks.length - shown.length;
-            const hc = document.getElementById('hovercard');
-            hc.innerHTML =
-                `<div class="hovercard-tracks-head">${esc(album.title)}</div>` +
-                `<ul class="hovercard-tracks">` +
-                shown.map(t => `<li><span class="tn">${t.track_number || '·'}</span><span>${esc(t.title)}</span></li>`).join('') +
-                `</ul>` +
-                (more > 0 ? `<div class="hovercard-more">+ ${more} more</div>` : '');
-            const el = document.querySelector(`.queue-item[data-queue-index="${idx}"]`);
-            placeHover((el || item).getBoundingClientRect(), false);
+        hoverTimer = setTimeout(() => {
+            hoverKey = 'q' + album.id;
+            renderQueueHover(idx, true);
         }, 500);
+    }
+
+    // Fill the popup with the album's *actual* queued tracks (from Sonos, not the
+    // catalog) plus a per-track remove control. reposition=true on first open;
+    // false when re-rendering in place after a removal (avoids the card jumping).
+    async function renderQueueHover(idx, reposition) {
+        const album = queue[idx];
+        if (!album) { hideHover(); return; }
+        const key = 'q' + album.id;
+        let data;
+        try {
+            data = await (await fetch(`/api/queue/album/${idx}/tracks`)).json();
+        } catch (e) { data = { tracks: [] }; }
+        if (hoverKey !== key) return;             // moved away while fetching
+        const tracks = data.tracks || [];
+        const hc = document.getElementById('hovercard');
+        hc.classList.add('interactive');
+        hc.innerHTML =
+            `<div class="hovercard-tracks-head">${esc(data.album || album.title)}</div>` +
+            `<ul class="hovercard-tracks">` +
+            tracks.map(t => `<li>
+                <span class="tn">${t.number || '·'}</span>
+                <span class="tt">${esc(t.title)}</span>
+                <button class="hc-remove" title="Remove track from queue"
+                        onclick="removeQueueTrack(${idx}, ${t.track_index})">&minus;</button>
+            </li>`).join('') +
+            `</ul>` +
+            (tracks.length ? '' : `<div class="hovercard-more">No tracks queued</div>`);
+        if (reposition) {
+            const el = document.querySelector(`.queue-item[data-queue-index="${idx}"]`);
+            if (el) placeHover(el.getBoundingClientRect(), false);
+        }
+    }
+
+    async function removeQueueTrack(idx, trackIndex) {
+        cancelHide();
+        let result;
+        try {
+            const res = await fetch(`/api/queue/album/${idx}/remove_track/${trackIndex}`,
+                                    { method: 'POST' });
+            if (!res.ok) { console.error('remove_track failed', res.status); return; }
+            result = await res.json();
+        } catch (e) { console.error(e); return; }
+
+        if (result.album_empty) {
+            // Last track gone — drop the album from the sidebar too.
+            queue.splice(idx, 1);
+            renderQueue();
+            saveQueueState();
+            hideHover();
+        } else {
+            // Re-fetch so the remaining tracks' indices stay correct.
+            renderQueueHover(idx, false);
+        }
     }
 
     // Only wire hover previews on devices that actually hover (skip touch)
@@ -1958,16 +2137,23 @@
         const grid = document.getElementById('albumsGrid');
         grid.addEventListener('mouseover', e => {
             const c = e.target.closest('.album-card');
-            if (c) scheduleAlbumHover(c); else hideHover();
+            if (c) scheduleAlbumHover(c); else scheduleHide();
         });
-        grid.addEventListener('mouseleave', hideHover);
+        grid.addEventListener('mouseleave', scheduleHide);
 
         const qlist = document.getElementById('queueList');
         qlist.addEventListener('mouseover', e => {
             const it = e.target.closest('.queue-item');
-            if (it) scheduleQueueHover(it); else hideHover();
+            if (it) scheduleQueueHover(it); else scheduleHide();
         });
-        qlist.addEventListener('mouseleave', hideHover);
+        qlist.addEventListener('mouseleave', scheduleHide);
+
+        // Moving onto the (queue) popup keeps it open; leaving it hides it.
+        const hc = document.getElementById('hovercard');
+        hc.addEventListener('mouseenter', cancelHide);
+        hc.addEventListener('mouseleave', () => { clearHotTrack(); scheduleHide(); });
+        // Recompute the highlighted row/button on every move (see updateHotTrack).
+        hc.addEventListener('mousemove', e => updateHotTrack(e.target));
 
         document.querySelector('.albums-section').addEventListener('scroll', hideHover, { passive: true });
         qlist.addEventListener('scroll', hideHover, { passive: true });

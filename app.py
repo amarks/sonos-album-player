@@ -920,6 +920,125 @@ def remove_from_queue(index):
         logger.error(f"Error removing from queue: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/queue/album/<int:index>/tracks')
+def queue_album_tracks(index):
+    """The tracks actually queued for the album at sidebar position `index`.
+
+    Unlike /api/albums/<id>/tracks (the library's full track list for an album),
+    this reflects what's really in the Sonos queue right now, so the per-track
+    remove controls in the queue popup act on reality rather than the catalog.
+    """
+    sonos = get_sonos_controller()
+    if not sonos:
+        return jsonify({'error': 'Cannot connect to Sonos'}), 500
+
+    try:
+        q = sonos.get_queue(max_items=1000)
+        ranges = _album_run_ranges_from_queue(q)
+        if index < 0 or index >= len(ranges):
+            return jsonify({'album': '', 'tracks': []})
+        run = ranges[index]
+        tracks = [{
+            'track_index': i - run['start'],
+            'number': getattr(q[i], 'original_track_number', None),
+            'title': getattr(q[i], 'title', '') or '',
+        } for i in range(run['start'], run['start'] + run['length'])]
+        return jsonify({'album': run['album'], 'tracks': tracks})
+    except Exception as e:
+        logger.error(f"Error listing queue tracks: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/queue/album/<int:index>/remove_track/<int:track_index>', methods=['POST'])
+def remove_queue_track(index, track_index):
+    """Remove one track (position `track_index` within the album run at sidebar
+    position `index`) from the Sonos queue in place, preserving playback.
+
+    Same drift guard as remove_from_queue: if the Sonos queue no longer lines up
+    with the saved sidebar, refuse (409) rather than delete the wrong track.
+    Returns album_empty=True when that was the album's last remaining track.
+    """
+    sonos = get_sonos_controller()
+    if not sonos:
+        return jsonify({'error': 'Cannot connect to Sonos'}), 500
+
+    try:
+        q = sonos.get_queue(max_items=1000)
+        ranges = _album_run_ranges_from_queue(q)
+        saved = _saved_queue_albums()
+        if len(ranges) != len(saved):
+            return jsonify({'error': 'Queue out of sync with sidebar'}), 409
+        if index < 0 or index >= len(ranges):
+            return jsonify({'error': 'Queue position out of range'}), 400
+        run = ranges[index]
+        want = (saved[index].get('title') or '').lower()
+        got = (run['album'] or '').lower()
+        if not want or (want not in got and got not in want):
+            return jsonify({'error': 'Queue out of sync with sidebar'}), 409
+        if track_index < 0 or track_index >= run['length']:
+            return jsonify({'error': 'Track position out of range'}), 400
+
+        sonos.remove_from_queue(run['start'] + track_index)
+        album_empty = run['length'] == 1
+        logger.info(f"Removed track {track_index} of album '{run['album']}'"
+                    f"{' (album now empty)' if album_empty else ''}")
+        return jsonify({'success': True, 'album_empty': album_empty})
+    except Exception as e:
+        logger.error(f"Error removing queue track: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/queue/move', methods=['POST'])
+def move_queue_album():
+    """Reorder an album within the Sonos queue in place, without clearing and
+    rebuilding it, so playback position and any per-track removals are preserved.
+
+    Body: {"from": <album idx>, "to": <album idx>} in the queue's current album
+    ordering, insert-before semantics (to == album count => move to the end) —
+    matching the sidebar's drag-drop drop index. Refuses with 409 on drift so the
+    caller can fall back to a full rebuild.
+    """
+    sonos = get_sonos_controller()
+    if not sonos:
+        return jsonify({'error': 'Cannot connect to Sonos'}), 500
+
+    data = request.get_json(silent=True) or {}
+    try:
+        src, dst = int(data['from']), int(data['to'])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({'error': 'from and to are required integers'}), 400
+
+    try:
+        q = sonos.get_queue(max_items=1000)
+        ranges = _album_run_ranges_from_queue(q)
+        saved = _saved_queue_albums()
+        n = len(ranges)
+        if n != len(saved):
+            return jsonify({'error': 'Queue out of sync with sidebar'}), 409
+        if src < 0 or src >= n or dst < 0 or dst > n:
+            return jsonify({'error': 'Queue position out of range'}), 400
+        want = (saved[src].get('title') or '').lower()
+        got = (ranges[src]['album'] or '').lower()
+        if not want or (want not in got and got not in want):
+            return jsonify({'error': 'Queue out of sync with sidebar'}), 409
+        # Dropped in place (before itself or its immediate successor) — no-op.
+        if dst in (src, src + 1):
+            return jsonify({'success': True, 'moved': False})
+
+        block = ranges[src]
+        total = sum(r['length'] for r in ranges)
+        insert_before = (ranges[dst]['start'] if dst < n else total) + 1  # 1-based
+        sonos.avTransport.ReorderTracksInQueue([
+            ('InstanceID', 0),
+            ('UpdateID', 0),
+            ('StartingIndex', block['start'] + 1),   # 1-based flat position
+            ('NumberOfTracks', block['length']),
+            ('InsertBefore', insert_before),
+        ])
+        logger.info(f"Reordered album '{block['album']}' from slot {src} to {dst}")
+        return jsonify({'success': True, 'moved': True})
+    except Exception as e:
+        logger.error(f"Error reordering queue: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
 def _saved_queue_albums():
     """The sidebar queue as an ordered list of {id, title, artist} dicts."""
     conn = sqlite3.connect(config['database_path'])
@@ -956,21 +1075,26 @@ def _sonos_queue_album_runs(sonos):
     return runs
 
 
-def _sonos_queue_album_run_ranges(sonos):
-    """Like _sonos_queue_album_runs but with each run's flat position range.
+def _album_run_ranges_from_queue(queue_items):
+    """Describe each album's contiguous block within an already-fetched Sonos queue.
 
-    Returns a list of {'album', 'start', 'length'} describing the contiguous
-    block of Sonos queue positions each album occupies, so a single album can be
-    removed in place without clearing and rebuilding the whole queue.
+    Returns a list of {'album', 'start', 'length'} so a single album (or one of
+    its tracks) can be removed in place by flat position without clearing and
+    rebuilding the whole queue.
     """
     ranges, last = [], object()
-    for idx, t in enumerate(sonos.get_queue(max_items=1000)):
+    for idx, t in enumerate(queue_items):
         alb = (getattr(t, 'album', None) or '').strip()
         if alb != last:
             ranges.append({'album': alb, 'start': idx, 'length': 0})
             last = alb
         ranges[-1]['length'] += 1
     return ranges
+
+
+def _sonos_queue_album_run_ranges(sonos):
+    """_album_run_ranges_from_queue over the live Sonos queue."""
+    return _album_run_ranges_from_queue(sonos.get_queue(max_items=1000))
 
 
 def _queue_matches_sidebar(sonos):
