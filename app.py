@@ -190,6 +190,20 @@ def _majority(values):
         return None
     return Counter(vals).most_common(1)[0][0]
 
+def _tag_lookup(tags, keys):
+    """Raw value of the first key present, or None.
+
+    Vorbis comments (FLAC/OGG) raise ValueError from `k in tags` for anything
+    that isn't a legal Vorbis key — including the MP4 atom names ('\xa9gen')
+    we try as fallbacks — so membership has to be guarded, not assumed."""
+    for k in keys:
+        try:
+            if k in tags:
+                return tags[k]
+        except (ValueError, KeyError):
+            continue
+    return None
+
 def _meta_of(audio):
     """(album, album_artist, track_artist, genre, year) from an opened mutagen file.
     Album-artist (TPE2/albumartist) and track-artist (TPE1/artist) are returned
@@ -208,11 +222,10 @@ def _meta_of(audio):
                 except Exception: pass
         else:  # Vorbis (FLAC/OGG) / MP4
             def dget(keys):
-                for k in keys:
-                    if k in tags:
-                        v = tags[k]
-                        return str(v[0]) if isinstance(v, list) else str(v)
-                return None
+                v = _tag_lookup(tags, keys)
+                if v is None:
+                    return None
+                return str(v[0]) if isinstance(v, list) else str(v)
             album = dget(['album', 'ALBUM', 'Album', '\xa9alb'])
             album_artist = dget(['albumartist', 'ALBUMARTIST', 'aART'])
             track_artist = dget(['artist', 'ARTIST', 'Artist', '\xa9ART'])
@@ -242,10 +255,7 @@ def _track_of(audio, path):
                 except Exception: pass
         else:  # Vorbis / MP4
             def dget(keys):
-                for k in keys:
-                    if k in tags:
-                        return tags[k]
-                return None
+                return _tag_lookup(tags, keys)
             tt = dget(['title', 'TITLE', 'Title', '\xa9nam'])
             if tt is not None:
                 title = str(tt[0]) if isinstance(tt, list) else str(tt)
