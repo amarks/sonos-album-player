@@ -1,28 +1,57 @@
-# Album Art Player (Sonos album browser)
+# Album Art Player
 
-> ⚠️ **Heads-up for Claude: the main context for this work lives in a sibling project.**
-> The persistent Claude memory, the full change history, and the music-library cleanup
-> that drives this app are all anchored in **`~/Documents/dev/music-cleanup`** — not here.
->
-> **If this session was started from this directory, remind the user at the top of your
-> first reply:** "Most of our context (Claude's persistent memory, the app build notes,
-> the deploy/rescan playbook, and the music-library cleanup log) is anchored in the
-> `~/Documents/dev/music-cleanup` project — its memory auto-loads there. For continuity,
-> consider starting the session from `music-cleanup`." Then offer to continue anyway
-> (the quick facts below are enough to work from here).
+A self-hosted web app for browsing a local music library and playing albums through Sonos speakers or directly on the local device.
 
-## Quick facts (so a standalone session here still functions)
-- **App:** Flask; the entire UI is one file — `templates/index.html` (inline CSS + JS).
-  This local folder is the source of truth (git-tracked; baseline commit `b64638f`).
-- **Runs on:** the NAS via a venv, **not Docker** (the Dockerfile is unused):
-  `.venv/bin/python app.py`, CWD `/volume1/docker/sonos_album_player`, **port 5100**,
-  live DB `data/sonos_albums.db`. `use_reloader=True, use_debugger=False`;
-  `TEMPLATES_AUTO_RELOAD=True`.
-- **Deploy:** `scp -O app.py ds223:/volume1/docker/sonos_album_player/app.py` (reloader
-  hot-restarts); `scp -O templates/index.html ds223:/volume1/docker/sonos_album_player/templates/index.html`
-  (live immediately, no restart). Check JS by extracting the `<script>` and `node --check`.
-- **Rebuild the library index** (after any tag/disc/art change):
-  `ssh ds223 "cd /volume1/docker/sonos_album_player && ./.venv/bin/python app.py scan --full"`.
-- **Architecture:** album = one folder; metadata by majority vote (prefers album-artist so
-  comps read "Various Artists"); `consolidate_multidisc()` merges disc folders by tags.
-- **Detailed running log:** `/volume1/scripts/music-cleanup/CLEANUP_LOG.md` on the NAS.
+## Architecture
+
+- **Backend**: Flask (`app.py`). All endpoints are in this single file.
+- **Frontend**: One file — `templates/index.html` — with all CSS and JS inline. No build step.
+- **Database**: SQLite (path set in `config.json`). Schema: `albums`, `tracks`, `settings` tables.
+- **Sonos control**: `soco` library. Auto-discovery via `soco.discover()` with configured-IP fallback.
+- **Audio tagging**: `mutagen` (MP3/ID3, FLAC, M4A).
+
+## Config
+
+Copy `config.json.example` to `config.json` and edit before first run:
+
+```json
+{
+  "sonos_ip": "192.168.1.100",
+  "music_directory": "/path/to/music",
+  "database_path": "./sonos_albums.db",
+  "port": 5100,
+  "items_per_page": 1000
+}
+```
+
+`sonos_ip` is a hint — if unreachable the app falls back to `soco.discover()` and updates `config.json` with the found IP.
+
+## Key flows
+
+- **Library scan**: `python app.py scan [--full]`. Walks `music_directory`, reads tags via mutagen, populates SQLite. Incremental by default (skips unchanged folders via a signature hash); `--full` rebuilds everything.
+- **Album model**: one folder = one album. Metadata derived by majority vote across all tracks (prefers `album_artist` tag so compilations show "Various Artists"). `consolidate_multidisc()` merges multi-disc folders by matching tags.
+- **Cover art**: extracted from track tags (APIC/FLAC picture/M4A covr), falls back to `cover.jpg` / `folder.jpg` in the album directory. Stored as base64 in SQLite. Served lazily per album via `/api/albums/<id>/art`.
+- **Sonos queue**: tracks resolved by searching the Sonos music library index (title + artist match). Queue operations always route to the group coordinator.
+- **Local playback**: `/stream/<track_id>` serves audio with HTTP range support. The frontend uses `<audio>` + MediaSession API for lock screen / CarPlay controls.
+
+## Running locally
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp config.json.example config.json   # then edit
+python app.py scan
+python app.py
+```
+
+Open `http://localhost:<port>` (default 5100).
+
+## Deploy notes
+
+The app uses `use_reloader=True` so a redeployed `app.py` restarts automatically. `templates/index.html` is picked up immediately without a restart (`TEMPLATES_AUTO_RELOAD=True`). The Dockerfile exists but the recommended deployment is a plain venv process.
+
+## JS syntax check
+
+```bash
+sed -n '/<script>/,/<\/script>/p' templates/index.html | sed '1d;$d' | node --check
+```

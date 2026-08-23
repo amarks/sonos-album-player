@@ -6,3 +6,6 @@ __pycache__/
 *.db-shm
 .DS_Store
 data/
+config.json
+STATUS.md
+*.log
