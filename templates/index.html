@@ -38,24 +38,40 @@
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
-        html, body { overflow-x: hidden; max-width: 100%; }
+        /* Both html AND body must be locked to the viewport with overflow: hidden.
+           Otherwise, if content briefly exceeds viewport height, html itself scrolls
+           and scroll-chaining from .albums-section shifts the whole page, pushing
+           .player-controls below the visible area. */
+        html, body {
+            width: 100%;
+            max-width: 100%;
+            overflow: hidden;
+            height: 100vh;
+            height: 100dvh;
+        }
 
         body {
             font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
             background: var(--bg);
             color: var(--text);
-            height: 100vh;
-            height: 100dvh;      /* track the actually-visible viewport (mobile Safari toolbars) */
-            overflow: hidden;
         }
 
         .container {
             display: grid;
             grid-template-columns: 260px minmax(0, 1fr);
-            grid-template-rows: 54px 1fr 88px;
+            /* minmax(0, 1fr) — NOT plain 1fr — so the middle row can't grow past its share
+               when album grid min-content would otherwise push the 88px player row
+               off the bottom of the viewport. */
+            grid-template-rows: 54px minmax(0, 1fr) 88px;
             height: 100vh;
             height: 100dvh;
+            width: 100%;
             max-width: 100%;
+            /* Belt and suspenders: even if a grid child briefly reports a min-content larger
+               than its track, clip rather than let it push the player row off-screen or
+               album cards past the right edge. Scrollable children (.albums-section,
+               .queue-scroll) have their own overflow so nothing meaningful is lost. */
+            overflow: hidden;
         }
 
         /* ── Header ──────────────────────────────── */
@@ -701,6 +717,22 @@
 
         .volume-icon { color: var(--text-3); font-size: 14px; flex-shrink: 0; }
 
+        .vol-btn {
+            background: transparent;
+            color: var(--text-3);
+            border: none;
+            padding: 4px;
+            border-radius: 4px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            transition: color 0.15s, background 0.15s;
+            flex-shrink: 0;
+        }
+        .vol-btn:hover { color: var(--text); background: var(--surface-2); }
+        .vol-btn svg { display: block; }
+
         .volume-slider {
             -webkit-appearance: none;
             appearance: none;
@@ -1232,19 +1264,27 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="3 6 9 12 3 18"/><polygon points="10 6 16 12 10 18"/><line x1="20" y1="6" x2="20" y2="18"/></svg>
             </button>
         </div>
-        <div class="volume-control">
+        <div class="volume-control" id="volumeControl">
             <svg class="volume-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
                 <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
             </svg>
+            <button class="vol-btn" onclick="nudgeVolume(-1)" title="Volume down (-1)" aria-label="Decrease volume by 1">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
             <input type="range" class="volume-slider" id="volumeSlider"
                    min="0" max="100" value="50"
                    oninput="onVolumeInput(this.value)"
                    onchange="setVolume(this.value)">
+            <button class="vol-btn" onclick="nudgeVolume(1)" title="Volume up (+1)" aria-label="Increase volume by 1">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
             <input type="number" class="volume-label" id="volumeLabel"
                    min="0" max="100" value="50"
                    oninput="onVolumeLabelInput(this.value)"
                    onkeydown="onVolumeLabelKey(event)"
+                   onfocus="setTimeout(() => this.select(), 0)"
+                   onmouseup="event.preventDefault()"
                    onblur="onVolumeLabelBlur(this.value)">
         </div>
     </div>
@@ -2148,6 +2188,23 @@
         document.getElementById('volumeLabel').value = val;
         updateVolumeFill(val);
     }
+
+    function nudgeVolume(delta) {
+        const slider = document.getElementById('volumeSlider');
+        const cur = parseInt(slider.value) || 0;
+        const v = Math.max(0, Math.min(100, cur + delta));
+        if (v === cur) return;
+        slider.value = v;
+        document.getElementById('volumeLabel').value = v;
+        updateVolumeFill(v);
+        setVolume(v);
+    }
+
+    // Scroll wheel over the volume area = ±1 per tick. Trackpad-friendly (small deltas still nudge by 1).
+    document.getElementById('volumeControl').addEventListener('wheel', e => {
+        e.preventDefault();
+        nudgeVolume(e.deltaY < 0 ? 1 : -1);
+    }, { passive: false });
 
     function setVolume(val) {
         const v = Math.max(0, Math.min(100, parseInt(val) || 0));
