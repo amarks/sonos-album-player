@@ -1,5 +1,5 @@
 {
-  "sonos_ip": "192.168.1.100",
+  "sonos_ip": "",
   "music_directory": "/path/to/your/music",
   "database_path": "./sonos_albums.db",
   "port": 5100,

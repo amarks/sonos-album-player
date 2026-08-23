@@ -24,7 +24,7 @@ Copy `config.json.example` to `config.json` and edit before first run:
 }
 ```
 
-`sonos_ip` is a hint — if unreachable the app falls back to `soco.discover()` and updates `config.json` with the found IP.
+`sonos_ip` is optional. Leave it empty and the app uses `soco.discover()` on first run, then writes the found IP back to `config.json` automatically. Setting it skips the multicast discovery delay (~5s) on subsequent starts.
 
 ## Key flows
 
