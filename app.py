@@ -1333,9 +1333,30 @@ def player_status():
             'state': transport_info['current_transport_state'],
             'track': track_info.get('title', ''),
             'artist': track_info.get('artist', ''),
-            'album': track_info.get('album', '')
+            'album': track_info.get('album', ''),
+            'play_mode': getattr(sonos, 'play_mode', 'NORMAL')
         })
     except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/player/play_mode', methods=['GET', 'POST'])
+def player_play_mode():
+    """Get or set the Sonos coordinator play_mode (NORMAL, SHUFFLE_NOREPEAT, etc.).
+
+    We use SHUFFLE_NOREPEAT for the shuffle toggle so each queue track plays
+    once before the queue ends — never twice. Tracks added mid-shuffle join
+    the pool automatically because Sonos treats them as unplayed.
+    """
+    sonos = get_sonos_controller()
+    if not sonos:
+        return jsonify({'error': 'Cannot connect to Sonos'}), 500
+    try:
+        if request.method == 'POST':
+            mode = (request.get_json() or {}).get('mode', 'NORMAL')
+            sonos.play_mode = mode
+        return jsonify({'mode': sonos.play_mode})
+    except Exception as e:
+        logger.error(f"Error setting play_mode: {e}")
         return jsonify({'error': str(e)}), 500
 
 def backfill_art():

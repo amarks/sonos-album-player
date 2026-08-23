@@ -226,7 +226,28 @@
             color: var(--text-3);
         }
 
-        .queue-buttons { display: flex; gap: 6px; }
+        .queue-buttons { display: flex; gap: 6px; align-items: center; }
+
+        .shuffle-btn {
+            padding: 3px 7px;
+            background: transparent;
+            color: var(--text-2);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.15s;
+        }
+        .shuffle-btn svg { width: 18px; height: 18px; display: block; }
+        .shuffle-btn:hover { color: var(--text-1); border-color: var(--surface-3); }
+        .shuffle-btn.on {
+            background: var(--accent);
+            color: var(--on-accent);
+            border-color: var(--accent);
+        }
+        .shuffle-btn.on:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 
         .play-queue-btn {
             padding: 5px 14px;
@@ -1161,6 +1182,14 @@
         <div class="queue-header">
             <span class="queue-label">Queue</span>
             <div class="queue-buttons">
+                <button class="shuffle-btn" id="shuffleBtn" onclick="toggleShuffle()" title="Shuffle" aria-label="Shuffle" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M2 6 C 10 6, 10 18, 16 18 L 20 18"/>
+                        <path d="M2 18 C 10 18, 10 6, 16 6 L 20 6"/>
+                        <polyline points="17 3 20 6 17 9"/>
+                        <polyline points="17 15 20 18 17 21"/>
+                    </svg>
+                </button>
                 <button class="play-queue-btn" onclick="playQueue()">Play</button>
                 <button class="clear-btn" onclick="clearQueue()">Clear</button>
             </div>
@@ -1267,6 +1296,9 @@
     let localAudio     = null; // HTMLAudioElement, created on first local play
     let localTrackList = [];   // flat track list for local playback
     let localTrackIdx  = -1;
+    let shuffleOn      = localStorage.getItem('localShuffle') === 'true'; // local mode toggle (Sonos mode reads its own from status)
+    let playedTrackIds = new Set();  // track ids played in current local shuffle cycle
+    let shuffleHistory = [];         // stack of prior track ids in current local shuffle cycle (for prev)
 
     // ── Helpers ──────────────────────────────────────────────────────────
     function esc(s) {
@@ -1456,8 +1488,11 @@
             </div>`;
             return;
         }
+        const missing = [];
         el.innerHTML = queue.map((album, i) => {
             const playing = currentPlayingAlbum && currentPlayingAlbum.id === album.id;
+            const art = album.cover_art || artCache[album.id];
+            if (!art && artCache[album.id] === undefined) missing.push(album);
             return `
             <div class="queue-item ${playing ? 'now-playing' : ''}"
                  data-queue-index="${i}" draggable="true"
@@ -1465,8 +1500,8 @@
                  ondragstart="handleQueueDragStart(event)"
                  ondragend="handleQueueDragEnd(event)">
                 <div class="playing-indicator"><span></span><span></span><span></span></div>
-                ${artSrc(album.cover_art)
-                    ? `<img src="${artSrc(album.cover_art)}" alt="${esc(album.title)}">`
+                ${art
+                    ? `<img src="${artSrc(art)}" alt="${esc(album.title)}">`
                     : `<div style="width:42px;height:42px;border-radius:5px;background:var(--surface-3);flex-shrink:0"></div>`}
                 <div class="queue-item-info">
                     <div class="q-title">${esc(album.title)}</div>
@@ -1477,6 +1512,23 @@
                         title="Remove">&#x2715;</button>
             </div>`;
         }).join('');
+        // Lazy-fetch art for queue items whose album never scrolled into the grid.
+        // Also backfill the in-memory album so subsequent renders don't refetch.
+        for (const album of missing) hydrateQueueArt(album);
+    }
+
+    async function hydrateQueueArt(album) {
+        if (artCache[album.id] !== undefined) return;
+        try {
+            const res  = await fetch(`/api/albums/${album.id}/art`);
+            const data = await res.json();
+            const art  = data.cover_art || null;
+            artCache[album.id] = art;
+            album.cover_art = art;
+            const gridAlbum = albums.find(a => a.id === album.id);
+            if (gridAlbum) gridAlbum.cover_art = art;
+            if (art) renderQueue();
+        } catch (e) { artCache[album.id] = null; }
     }
 
     async function addAlbumToQueue(albumId, event) {
@@ -1485,7 +1537,25 @@
         if (!album) return;
         queue.push(album);
         renderQueue();
-        if (isLocalMode) { saveLocalQueueState(); return; }
+        if (isLocalMode) {
+            saveLocalQueueState();
+            // In local mode with a playing session, extend the pool with the new album's tracks
+            // so shuffle picks them up immediately (Sonos handles this automatically via play_mode).
+            if (localAudio && localTrackList.length) {
+                try {
+                    const tracks = await fetch(`/api/albums/${album.id}/tracks`).then(r => r.json());
+                    for (const t of tracks) {
+                        localTrackList.push({
+                            id: t.id, title: t.title || '', artist: album.artist || '',
+                            albumTitle: album.title || '',
+                            albumArt: album.cover_art || artCache[album.id] || null,
+                            albumId: album.id
+                        });
+                    }
+                } catch (e) { console.error('Error extending local track list:', e); }
+            }
+            return;
+        }
         saveQueueState();
         try {
             const res = await fetch(`/api/queue/add/${album.id}`, { method: 'POST' });
@@ -1507,7 +1577,13 @@
     async function clearQueue() {
         queue = [];
         renderQueue();
-        if (isLocalMode) { saveLocalQueueState(); return; }
+        if (isLocalMode) {
+            localTrackList = [];
+            playedTrackIds = new Set();
+            shuffleHistory = [];
+            saveLocalQueueState();
+            return;
+        }
         saveQueueState();
         try { await fetch('/api/queue/clear', { method: 'POST' }); }
         catch (e) { console.error(e); }
@@ -1525,9 +1601,23 @@
     }
 
     async function removeFromQueue(index) {
-        queue.splice(index, 1);
+        const removedAlbum = queue.splice(index, 1)[0];
         renderQueue();
-        if (isLocalMode) { saveLocalQueueState(); return; }
+        if (isLocalMode) {
+            if (removedAlbum) {
+                // Drop this album's tracks from the shuffle pool + played/history sets.
+                const dropIds = new Set(
+                    localTrackList.filter(t => t.albumId === removedAlbum.id).map(t => t.id));
+                if (dropIds.size) {
+                    localTrackList = localTrackList.filter(t => !dropIds.has(t.id));
+                    dropIds.forEach(id => playedTrackIds.delete(id));
+                    shuffleHistory = shuffleHistory.filter(id => !dropIds.has(id));
+                    if (localTrackIdx >= 0 && !localTrackList[localTrackIdx]) localTrackIdx = -1;
+                }
+            }
+            saveLocalQueueState();
+            return;
+        }
         // Remove just this album's tracks from Sonos in place (preserves the
         // currently-playing track). Must hit the endpoint before saveQueueState
         // so the server still sees the pre-removal sidebar order for its guard.
@@ -1738,6 +1828,12 @@
             isPlaying = status.state === 'PLAYING';
             document.getElementById('playPauseBtn').innerHTML = isPlaying ? '&#9646;&#9646;' : '&#9654;';
 
+            // Reflect Sonos-side play_mode so external changes (Sonos app) sync into the UI.
+            if (status.play_mode !== undefined) {
+                const sonosShuffle = String(status.play_mode).startsWith('SHUFFLE');
+                if (sonosShuffle !== shuffleOn) { shuffleOn = sonosShuffle; updateShuffleBtn(); }
+            }
+
             const artEl  = document.getElementById('npArt');
             const textEl = document.getElementById('npText');
 
@@ -1859,6 +1955,10 @@
             queue = [];
             renderQueue();
             loadLocalQueueState();
+            shuffleOn = localStorage.getItem('localShuffle') === 'true';
+            playedTrackIds = new Set();
+            shuffleHistory = [];
+            updateShuffleBtn();
             const label = getDeviceLabel();
             document.getElementById('speakerName').textContent = label;
             document.getElementById('speakerBtn').title = label;
@@ -2361,6 +2461,14 @@
             document.getElementById('playPauseBtn').innerHTML = '&#9654;';
         });
         localAudio.addEventListener('ended', () => {
+            if (shuffleOn) {
+                const idx = pickShuffleNext();
+                if (idx >= 0) { localPlayTrack(idx); return; }
+                isPlaying = false;
+                localTrackIdx = -1;
+                document.getElementById('playPauseBtn').innerHTML = '&#9654;';
+                return;
+            }
             if (localTrackIdx + 1 < localTrackList.length) {
                 localPlayTrack(localTrackIdx + 1);
             } else {
@@ -2371,7 +2479,12 @@
         });
         localAudio.addEventListener('error', () => {
             console.error('Local audio error on track', localTrackIdx);
-            if (localTrackIdx + 1 < localTrackList.length) localPlayTrack(localTrackIdx + 1);
+            if (shuffleOn) {
+                const idx = pickShuffleNext();
+                if (idx >= 0) localPlayTrack(idx);
+            } else if (localTrackIdx + 1 < localTrackList.length) {
+                localPlayTrack(localTrackIdx + 1);
+            }
         });
     }
 
@@ -2394,13 +2507,25 @@
                 }
             } catch (e) { console.error('Error fetching tracks for', album.title, e); }
         }
-        if (localTrackList.length) localPlayTrack(0);
+        if (!localTrackList.length) return;
+        // Fresh shuffle cycle for a new play session.
+        playedTrackIds = new Set();
+        shuffleHistory = [];
+        const start = shuffleOn ? Math.floor(Math.random() * localTrackList.length) : 0;
+        localPlayTrack(start);
     }
 
-    function localPlayTrack(idx) {
+    function localPlayTrack(idx, opts) {
+        opts = opts || {};
         if (!localAudio || idx < 0 || idx >= localTrackList.length) return;
+        if (shuffleOn && localTrackIdx >= 0 && localTrackIdx !== idx
+            && localTrackList[localTrackIdx] && !opts.skipHistoryPush) {
+            shuffleHistory.push(localTrackList[localTrackIdx].id);
+            if (shuffleHistory.length > 200) shuffleHistory.shift();
+        }
         localTrackIdx = idx;
         const t = localTrackList[idx];
+        if (shuffleOn) playedTrackIds.add(t.id);
         localAudio.src = `/stream/${t.id}`;
         localAudio.play().catch(e => console.error('Local play error:', e));
         updateLocalNowPlaying(t);
@@ -2444,15 +2569,71 @@
     }
 
     function localNextTrack() {
+        if (shuffleOn) {
+            const idx = pickShuffleNext();
+            if (idx >= 0) localPlayTrack(idx);
+            return;
+        }
         if (localTrackIdx + 1 < localTrackList.length) localPlayTrack(localTrackIdx + 1);
     }
 
     function localPrevTrack() {
+        if (shuffleOn) {
+            if (localAudio && localAudio.currentTime > 3) { localAudio.currentTime = 0; return; }
+            const prevId = shuffleHistory.pop();
+            if (!prevId) return;
+            const idx = localTrackList.findIndex(t => t.id === prevId);
+            if (idx < 0) return;
+            // Take current out of played so forward-shuffle can pick it again later.
+            if (localTrackIdx >= 0 && localTrackList[localTrackIdx]) {
+                playedTrackIds.delete(localTrackList[localTrackIdx].id);
+            }
+            localPlayTrack(idx, /*fromShuffle=*/true, /*skipHistoryPush=*/true);
+            return;
+        }
         if (localAudio && localAudio.currentTime > 3) {
             localAudio.currentTime = 0;
         } else if (localTrackIdx > 0) {
             localPlayTrack(localTrackIdx - 1);
         }
+    }
+
+    // Pick a random unplayed track id's index; returns -1 when the pool is exhausted so playback stops.
+    function pickShuffleNext() {
+        if (!localTrackList.length) return -1;
+        const unplayed = localTrackList.filter(t => !playedTrackIds.has(t.id));
+        if (!unplayed.length) return -1;
+        const pick = unplayed[Math.floor(Math.random() * unplayed.length)];
+        return localTrackList.findIndex(t => t.id === pick.id);
+    }
+
+    function updateShuffleBtn() {
+        const btn = document.getElementById('shuffleBtn');
+        if (!btn) return;
+        btn.classList.toggle('on', shuffleOn);
+        btn.setAttribute('aria-pressed', shuffleOn ? 'true' : 'false');
+    }
+
+    async function toggleShuffle() {
+        shuffleOn = !shuffleOn;
+        updateShuffleBtn();
+        if (isLocalMode) {
+            localStorage.setItem('localShuffle', shuffleOn ? 'true' : 'false');
+            // Fresh cycle on toggle; keep the current track marked played so shuffle doesn't jump to it.
+            playedTrackIds = new Set();
+            shuffleHistory = [];
+            if (localTrackIdx >= 0 && localTrackList[localTrackIdx]) {
+                playedTrackIds.add(localTrackList[localTrackIdx].id);
+            }
+            return;
+        }
+        try {
+            await fetch('/api/player/play_mode', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: shuffleOn ? 'SHUFFLE_NOREPEAT' : 'NORMAL' })
+            });
+        } catch (e) { console.error('Error setting Sonos play_mode:', e); shuffleOn = !shuffleOn; updateShuffleBtn(); }
     }
 
     function localNextAlbum() {
@@ -2478,6 +2659,8 @@
         isLocalMode = true;
         document.body.classList.add('local-mode');
     }
+    // In Sonos mode, shuffleOn will be overwritten from /api/player/status; in local mode we honor localStorage.
+    updateShuffleBtn();
     loadAlbums();
     loadSpeakers();
     updatePlayerStatus();
