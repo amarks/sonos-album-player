@@ -1,87 +1,93 @@
 # Sonos Album Player
 
-A web-based interface for playing albums on Sonos with drag-and-drop queue management.
+A self-hosted web app for browsing your music library by album and playing through Sonos — or directly on the device you're using (iPhone, Mac, etc.).
+
+**Designed by Alan Marks. Built with [Claude](https://claude.ai).** Bug reports and pull requests welcome.
+
+---
 
 ## Features
 
-- Browse your music library with album covers
-- Sort by Albums, Artists, or Genre
-- Drag-and-drop albums to build a queue
-- Full Sonos playback controls
-- Apple-inspired clean design
-- Persistent album database with cover art
+- Browse your library by album cover art, sorted by artist, album, or genre
+- Search and filter
+- Drag albums onto the queue, reorder, remove individual tracks
+- Full Sonos group/speaker switching and playback controls
+- **Local device playback** — play directly in the browser on any device (iPhone, Mac, etc.) with lock screen and CarPlay controls via the MediaSession API
+- Sonos auto-discovery — no need to know your speaker's IP address
+- Incremental library scanning (re-scan only picks up what changed)
+- Dark UI, mobile-friendly
 
-## Installation on Synology NAS
+## Requirements
 
-### Prerequisites
+- Python 3.8+
+- A Sonos system (for Sonos playback; local device playback works without one)
+- Music files in MP3, FLAC, or M4A format
+- The machine running the app must be able to read your music files
 
-1. SSH access to your Synology NAS
-2. Python 3.8+ installed on your NAS
-3. Your Sonos controller's IP address
-4. Music files stored on your NAS
+The app runs as a plain Python process — no Docker required, though a Dockerfile is included if you prefer containers.
 
-### Setup Steps
+## Setup
 
-1. **SSH into your NAS:**
-   ```bash
-   ssh admin@your-nas-ip
-   ```
+**1. Clone and install dependencies**
 
-2. **Create project directory:**
-   ```bash
-   mkdir -p /volume1/sonos-player
-   cd /volume1/sonos-player
-   ```
+```bash
+git clone https://github.com/amarks/sonos-album-player.git
+cd sonos-album-player
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
 
-3. **Upload files:**
-   - `app.py` - Main backend application
-   - `requirements.txt` - Python dependencies
-   - Create `templates/` folder and upload `index.html`
+**2. Configure**
 
-4. **Install dependencies:**
-   ```bash
-   pip3 install -r requirements.txt
-   ```
+```bash
+cp config.json.example config.json
+```
 
-5. **Configure the application:**
-   Edit `config.json` (will be created on first run):
-   ```json
-   {
-     "sonos_ip": "192.168.1.100",
-     "music_directory": "/volume1/music",
-     "database_path": "./sonos_albums.db",
-     "port": 5000,
-     "items_per_page": 50
-   }
-   ```
+Edit `config.json`:
 
-6. **Scan your music library:**
-   ```bash
-   python3 app.py scan
-   ```
-   This will create the database and index all albums. May take 10-30 minutes depending on library size.
+```json
+{
+  "sonos_ip": "",
+  "music_directory": "/path/to/your/music",
+  "database_path": "./sonos_albums.db",
+  "port": 5100,
+  "items_per_page": 1000
+}
+```
 
-7. **Start the service:**
-   ```bash
-   python3 app.py
-   ```
+- `sonos_ip` — leave blank to use auto-discovery. The app will find your Sonos and cache the IP automatically. You can set it explicitly (e.g. `"192.168.1.100"`) to skip the discovery delay on startup.
+- `music_directory` — the root folder containing your music. The scanner walks it recursively, treating each folder as one album.
 
-## Running as a Service on Synology
+**3. Scan your library**
 
-### Option 1: Using Task Scheduler (GUI)
+```bash
+python3 app.py scan
+```
 
-1. Open **Control Panel** → **Task Scheduler**
-2. Create → **Triggered Task** → **User-defined script**
-3. General tab:
-   - Task: "Sonos Player"
-   - User: Your admin user
-4. Task Settings tab:
-   - Run command: `python3 /volume1/sonos-player/app.py`
-5. Schedule: Boot-up
+This reads your music files, extracts metadata and cover art, and populates the database. A library of a few thousand albums takes a minute or two.
 
-### Option 2: Using systemd (Advanced)
+**4. Start the app**
 
-Create `/etc/systemd/system/sonos-player.service`:
+```bash
+python3 app.py
+```
+
+Open `http://localhost:5100` in your browser.
+
+## Running on a home server or NAS
+
+The app is designed to run as a background process on an always-on machine (NAS, Raspberry Pi, old Mac mini, etc.) so it's available from any device on your network.
+
+**Simple background start:**
+
+```bash
+nohup .venv/bin/python app.py > app.log 2>&1 &
+```
+
+**As a systemd service** (Linux):
+
+Create `/etc/systemd/system/sonos-album-player.service`:
 
 ```ini
 [Unit]
@@ -90,136 +96,66 @@ After=network.target
 
 [Service]
 Type=simple
-User=admin
-WorkingDirectory=/volume1/sonos-player
-ExecStart=/usr/bin/python3 /volume1/sonos-player/app.py
+User=your-username
+WorkingDirectory=/path/to/sonos-album-player
+ExecStart=/path/to/sonos-album-player/.venv/bin/python app.py
 Restart=always
-RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Enable and start:
 ```bash
-sudo systemctl enable sonos-player
-sudo systemctl start sonos-player
+sudo systemctl enable sonos-album-player
+sudo systemctl start sonos-album-player
 ```
+
+Once running, access it from any device on your network at `http://<server-ip>:5100` (e.g. `http://192.168.1.50:5100`).
 
 ## Usage
 
-1. **Access the interface:**
-   Open browser to `http://your-nas-ip:5000`
+**Sonos playback**
 
-2. **Browse albums:**
-   - Click "Albums", "Artists", or "Genre" to sort
-   - Scroll through your collection
+Select a Sonos room or group from the speaker dropdown. Drag albums into the queue, then hit Play. The queue persists across sessions.
 
-3. **Build queue:**
-   - Drag album covers from the main grid to the Queue panel on the left
-   - Albums will be added to Sonos queue in order
+**Local device playback**
 
-4. **Manage queue:**
-   - Drag albums out of the queue to remove them
-   - Click "Clear" to empty the entire queue
+Select "This iPhone", "This Mac", etc. from the speaker dropdown. The queue is independent from your Sonos queue — both can run at the same time. On iPhone with CarPlay connected, the Now Playing screen and steering wheel controls work automatically.
 
-5. **Control playback:**
-   - ⏮ = Previous album (skip back ~20 tracks)
-   - ⏪ = Previous track
-   - ▶/⏸ = Play/Pause
-   - ⏩ = Next track
-   - ⏭ = Next album (skip forward ~20 tracks)
+**Re-scanning after adding music**
 
-## Configuration Details
-
-### config.json Parameters
-
-- **sonos_ip**: IP address of your Sonos controller (required)
-- **music_directory**: Path to your music folder on NAS
-- **database_path**: Where to store the SQLite database
-- **port**: Web server port (default: 5000)
-- **items_per_page**: Number of albums to load per page
-
-### Finding Your Sonos IP
-
-1. Open Sonos app
-2. Settings → System → About My System
-3. Look for IP address of any speaker
-
-## Maintenance
-
-### Re-scan Library
-
-When you add new albums:
 ```bash
-cd /volume1/sonos-player
 python3 app.py scan
 ```
 
-### View Logs
-
-```bash
-tail -f /volume1/sonos-player/sonos.log
-```
+Run without `--full` for a fast incremental scan (skips unchanged folders). Add `--full` to rebuild everything from scratch.
 
 ## Troubleshooting
 
-### Cannot connect to Sonos
-- Verify Sonos IP in config.json
-- Ensure NAS and Sonos are on same network
-- Try pinging the Sonos: `ping 192.168.1.100`
+**Sonos not found**
 
-### Albums not showing
-- Run rescan: `python3 app.py scan`
-- Check music_directory path is correct
-- Verify NAS has read access to music files
+Auto-discovery uses multicast, which can occasionally be blocked by network configuration. If discovery fails, find your Sonos IP (Sonos app → Settings → System → About My System) and set `sonos_ip` in `config.json` (e.g. `"192.168.1.100"`). Make sure the machine running the app and your Sonos speakers are on the same network.
 
-### Cover art not loading
-- Ensure music files have embedded album art
-- Supported formats: MP3, FLAC, M4A with embedded images
+**Music won't play through Sonos**
 
-### Music won't play
-- Sonos needs network access to music files
-- Check that music_directory is accessible via SMB/NFS
-- May need to configure Sonos Music Library settings
+Sonos plays files directly from your network — it doesn't stream through this app. Your music folder needs to be accessible to Sonos as a network share (SMB/NFS). Set that up in the Sonos app under Settings → System → Music Library.
 
-## Architecture Notes
+**Albums missing or cover art not showing**
 
-### Queue Management
-The app sends commands directly to Sonos rather than maintaining a separate queue state. When you drag albums to the queue:
+Run `python3 app.py scan` to pick up any new files. Cover art is read from embedded tags (MP3/FLAC/M4A) or from a `cover.jpg` / `folder.jpg` file in the album directory.
 
-1. Album is added to local queue display (instant feedback)
-2. API call adds all tracks to Sonos queue
-3. Sonos manages actual playback order
+**FLAC albums not appearing**
 
-This approach means:
-- Queue persists across app restarts (stored in Sonos)
-- Multiple clients can control the same queue
-- No sync issues between app and Sonos state
+Make sure your FLAC files have an `ALBUM` Vorbis comment tag. Files without an album tag are skipped during scanning.
 
-### File Access
-Music files must be accessible to Sonos via your network shares. The app reads metadata for indexing but Sonos plays files directly from the NAS.
+## Architecture
 
-## Future Enhancements
-
-Potential improvements:
-- Search/filter albums
-- Playlist support
-- Multiple Sonos zones
-- Album shuffle
-- Recently played
-- Favorites/bookmarks
-- Lazy loading for large libraries (currently loads 50 at a time)
-- Album grouping by artist/genre folders
-
-## Additional Config Options
-
-Add to config.json:
-- **cache_covers**: Pre-load cover art for faster browsing
-- **enable_transcoding**: Convert formats on-the-fly
-- **sonos_username/password**: For secured Sonos systems
-- **theme**: Light/dark mode preference
+- **Backend**: Flask (`app.py`) — all API endpoints in one file
+- **Frontend**: `templates/index.html` — all CSS and JS inline, no build step
+- **Database**: SQLite for album/track metadata and cover art
+- **Sonos control**: [soco](https://github.com/SoCo/SoCo) library
+- **Audio tagging**: [mutagen](https://mutagen.readthedocs.io/)
 
 ## License
 
-MIT License - Free to use and modify
+MIT
