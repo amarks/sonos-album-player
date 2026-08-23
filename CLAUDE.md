@@ -1,4 +1,4 @@
-# Album Art Player
+# Sonos Album Player
 
 A self-hosted web app for browsing a local music library and playing albums through Sonos speakers or directly on the local device.
 
