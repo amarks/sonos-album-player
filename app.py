@@ -9,6 +9,7 @@ from flask_cors import CORS
 import sqlite3
 import json
 import os
+import re
 import sys
 from pathlib import Path
 import base64
@@ -1364,6 +1365,59 @@ def backfill_art():
     conn.close()
     logger.info(f"Backfill complete: {filled}/{len(rows)} filled")
     return {'filled': filled, 'total': len(rows)}
+
+@app.route('/stream/<int:track_id>')
+def stream_track(track_id):
+    """Stream an audio file with HTTP range request support (required for seeking on iOS/Safari)."""
+    conn = sqlite3.connect(config['database_path'])
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute('SELECT path FROM tracks WHERE id = ?', (track_id,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return jsonify({'error': 'Track not found'}), 404
+
+    path = row['path']
+    if not os.path.isfile(path):
+        return jsonify({'error': 'File not found on disk'}), 404
+
+    file_size = os.path.getsize(path)
+    ext = os.path.splitext(path)[1].lower().lstrip('.')
+    mime = {'mp3': 'audio/mpeg', 'flac': 'audio/flac',
+            'm4a': 'audio/mp4', 'aac': 'audio/aac',
+            'ogg': 'audio/ogg', 'opus': 'audio/ogg'}.get(ext, 'audio/mpeg')
+
+    range_header = request.headers.get('Range', '')
+    byte_start, byte_end = 0, file_size - 1
+    m = re.match(r'bytes=(\d+)-(\d*)', range_header)
+    if m:
+        byte_start = int(m.group(1))
+        if m.group(2):
+            byte_end = int(m.group(2))
+
+    length = byte_end - byte_start + 1
+
+    def generate(start, length):
+        with open(path, 'rb') as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = f.read(min(65536, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    status = 206 if m else 200
+    rv = Response(generate(byte_start, length), status,
+                  content_type=mime, direct_passthrough=True)
+    rv.headers['Accept-Ranges'] = 'bytes'
+    rv.headers['Content-Length'] = length
+    if m:
+        rv.headers['Content-Range'] = f'bytes {byte_start}-{byte_end}/{file_size}'
+    return rv
+
 
 if __name__ == '__main__':
     config = load_config()

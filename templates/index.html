@@ -195,6 +195,7 @@
         }
 
         .speaker-option.active .dot { opacity: 1; }
+        .speaker-option-divider { border-top: 1px solid var(--surface-3); margin: 4px 0; }
 
         /* ── Queue sidebar ───────────────────────── */
         .queue-section {
@@ -1212,6 +1213,11 @@
     let currentSpeakerIp = '';
     const artCache     = {};  // album id → base64 cover art
     let artObserver    = null;
+    let isLocalMode    = false;
+    let savedSonosQueue = [];  // Sonos queue saved while in local mode
+    let localAudio     = null; // HTMLAudioElement, created on first local play
+    let localTrackList = [];   // flat track list for local playback
+    let localTrackIdx  = -1;
 
     // ── Helpers ──────────────────────────────────────────────────────────
     function esc(s) {
@@ -1231,6 +1237,16 @@
         return base64 ? `data:${artMime(base64)};base64,${base64}` : '';
     }
 
+    function getDeviceLabel() {
+        const ua = navigator.userAgent;
+        const pl = navigator.platform || '';
+        if (/iPad/.test(ua) || (pl === 'MacIntel' && navigator.maxTouchPoints > 1)) return 'This iPad';
+        if (/iPhone/.test(ua)) return 'This iPhone';
+        if (/Android/.test(ua)) return 'This Android';
+        if (/Mac/.test(pl)) return 'This Mac';
+        return 'This Device';
+    }
+
     // ── Albums ───────────────────────────────────────────────────────────
     async function loadAlbums(sort = 'artist') {
         currentSort = sort;
@@ -1247,7 +1263,10 @@
             filterAlbums();  // applies search + genre filter, then renders
             document.querySelectorAll('.sort-btn').forEach(b =>
                 b.classList.toggle('active', b.dataset.sort === sort));
-            if (currentSort === sort) loadQueueState();  // restore once on initial load
+            if (currentSort === sort) {
+                if (isLocalMode) loadLocalQueueState();
+                else loadQueueState();
+            }
         } catch (e) {
             console.error('Error loading albums:', e);
         }
@@ -1414,6 +1433,7 @@
         if (!album) return;
         queue.push(album);
         renderQueue();
+        if (isLocalMode) { saveLocalQueueState(); return; }
         saveQueueState();
         try {
             const res = await fetch(`/api/queue/add/${album.id}`, { method: 'POST' });
@@ -1435,12 +1455,14 @@
     async function clearQueue() {
         queue = [];
         renderQueue();
+        if (isLocalMode) { saveLocalQueueState(); return; }
         saveQueueState();
         try { await fetch('/api/queue/clear', { method: 'POST' }); }
         catch (e) { console.error(e); }
     }
 
     async function playQueue() {
+        if (isLocalMode) { await localPlayQueue(); return; }
         try {
             const res = await fetch('/api/queue/play', { method: 'POST' });
             const result = await res.json();
@@ -1453,6 +1475,7 @@
     async function removeFromQueue(index) {
         queue.splice(index, 1);
         renderQueue();
+        if (isLocalMode) { saveLocalQueueState(); return; }
         // Remove just this album's tracks from Sonos in place (preserves the
         // currently-playing track). Must hit the endpoint before saveQueueState
         // so the server still sees the pre-removal sidebar order for its guard.
@@ -1484,6 +1507,20 @@
                 renderQueue();
             }
         } catch (e) { console.error('Error loading queue state:', e); }
+    }
+
+    function saveLocalQueueState() {
+        try { localStorage.setItem('localQueue', JSON.stringify(queue.map(a => a.id))); }
+        catch (e) { console.error(e); }
+    }
+
+    function loadLocalQueueState() {
+        try {
+            const ids = JSON.parse(localStorage.getItem('localQueue') || '[]');
+            if (!ids.length) return;
+            const restored = ids.map(id => albums.find(a => a.id === id)).filter(Boolean);
+            if (restored.length) { queue = restored; renderQueue(); }
+        } catch (e) { console.error(e); }
     }
 
     // ── Drag and drop ─────────────────────────────────────────────────────
@@ -1579,6 +1616,7 @@
         const [item] = queue.splice(from, 1);
         queue.splice(target, 0, item);
         renderQueue();
+        if (isLocalMode) { saveLocalQueueState(); return; }
         // Reorder the Sonos queue in place (preserves playback + per-track removals).
         let moved = false;
         try {
@@ -1596,6 +1634,16 @@
 
     // ── Player controls ───────────────────────────────────────────────────
     async function togglePlayPause() {
+        if (isLocalMode) {
+            if (!localAudio || localTrackIdx < 0) {
+                if (queue.length) await localPlayQueue();
+            } else if (localAudio.paused) {
+                localAudio.play().catch(e => console.error(e));
+            } else {
+                localAudio.pause();
+            }
+            return;
+        }
         const endpoint = isPlaying ? '/api/player/pause' : '/api/player/play';
         try {
             await fetch(endpoint, { method: 'POST' });
@@ -1605,26 +1653,31 @@
     }
 
     async function nextTrack() {
+        if (isLocalMode) { localNextTrack(); return; }
         try { await fetch('/api/player/next', { method: 'POST' }); }
         catch (e) { console.error(e); }
     }
 
     async function previousTrack() {
+        if (isLocalMode) { localPrevTrack(); return; }
         try { await fetch('/api/player/previous', { method: 'POST' }); }
         catch (e) { console.error(e); }
     }
 
     async function nextAlbum() {
+        if (isLocalMode) { localNextAlbum(); return; }
         try { await fetch('/api/player/next_album', { method: 'POST' }); }
         catch (e) { console.error(e); }
     }
 
     async function prevAlbum() {
+        if (isLocalMode) { localPrevAlbum(); return; }
         try { await fetch('/api/player/prev_album', { method: 'POST' }); }
         catch (e) { console.error(e); }
     }
 
     async function updatePlayerStatus() {
+        if (isLocalMode) return;
         try {
             const res    = await fetch('/api/player/status');
             const status = await res.json();
@@ -1698,17 +1751,18 @@
             const res = await fetch('/api/speakers');
             speakerList = await res.json();
             const active = speakerList.find(s => s.selected);
-            if (active) {
+            if (active && !isLocalMode) {
                 currentSpeakerIp = active.coordinator_ip;
                 setSpeakerLabel(active);
             }
             const menu = document.getElementById('speakerMenu');
+            const deviceLabel = getDeviceLabel();
             menu.innerHTML = speakerList.map(s => {
                 const subtitle = s.members.length > 1
                     ? `<span class="speaker-members">${s.members.map(m => esc(m.name)).join(' · ')}</span>`
                     : '';
                 return `
-                <div class="speaker-option ${s.selected ? 'active' : ''}"
+                <div class="speaker-option ${s.selected && !isLocalMode ? 'active' : ''}"
                      data-coordinator-ip="${s.coordinator_ip}"
                      onclick="selectSpeaker('${s.coordinator_ip}')">
                     <div class="speaker-option-text">
@@ -1717,7 +1771,18 @@
                     </div>
                     <div class="dot"></div>
                 </div>`;
-            }).join('');
+            }).join('') +
+            `<div class="speaker-option-divider"></div>
+            <div class="speaker-option ${isLocalMode ? 'active' : ''}"
+                 data-coordinator-ip="__local__"
+                 onclick="selectSpeaker('__local__')">
+                <div class="speaker-option-text"><span>${deviceLabel}</span></div>
+                <div class="dot"></div>
+            </div>`;
+            if (isLocalMode) {
+                document.getElementById('speakerName').textContent = deviceLabel;
+                document.getElementById('speakerBtn').title = deviceLabel;
+            }
         } catch (e) {
             document.getElementById('speakerName').textContent = 'No speakers';
         }
@@ -1733,6 +1798,35 @@
 
     async function selectSpeaker(ip) {
         document.getElementById('speakerMenu').classList.remove('open');
+
+        if (ip === '__local__') {
+            if (!isLocalMode) savedSonosQueue = [...queue];
+            isLocalMode = true;
+            localStorage.setItem('localMode', 'true');
+            queue = [];
+            renderQueue();
+            loadLocalQueueState();
+            const label = getDeviceLabel();
+            document.getElementById('speakerName').textContent = label;
+            document.getElementById('speakerBtn').title = label;
+            document.querySelectorAll('.speaker-option').forEach(el =>
+                el.classList.toggle('active', el.dataset.coordinatorIp === '__local__'));
+            syncVolume();
+            return;
+        }
+
+        if (isLocalMode) {
+            saveLocalQueueState();
+            if (localAudio) localAudio.pause();
+            isLocalMode = false;
+            localStorage.removeItem('localMode');
+            isPlaying = false;
+            document.getElementById('playPauseBtn').innerHTML = '&#9654;';
+            document.getElementById('npText').innerHTML = '';
+            document.getElementById('npArt').style.visibility = 'hidden';
+            currentPlayingAlbum = null;
+        }
+
         const s = speakerList.find(sp => sp.coordinator_ip === ip);
         if (s) setSpeakerLabel(s);
         currentSpeakerIp = ip;
@@ -1806,18 +1900,26 @@
     async function renderModalQueueTracks(idx) {
         let tracks = [];
         try {
-            const data = await fetch(`/api/queue/album/${idx}/tracks`).then(r => r.json());
-            tracks = data.tracks || [];
+            if (isLocalMode) {
+                const album = queue[idx];
+                if (album) {
+                    const data = await fetch(`/api/albums/${album.id}/tracks`).then(r => r.json());
+                    tracks = data.map(t => ({ number: t.track_number, title: t.title, track_index: t.id }));
+                }
+            } else {
+                const data = await fetch(`/api/queue/album/${idx}/tracks`).then(r => r.json());
+                tracks = data.tracks || [];
+            }
         } catch (e) { console.error(e); }
         document.getElementById('trackList').innerHTML = tracks.map(t => `
             <li class="track-item">
                 <span class="track-number">${t.number || '·'}</span>
                 <span class="track-title">${esc(t.title)}</span>
-                <button class="track-remove" title="Remove from queue"
-                        onclick="removeModalQueueTrack(${idx}, ${t.track_index})">&minus;</button>
+                ${isLocalMode ? '' : `<button class="track-remove" title="Remove from queue"
+                        onclick="removeModalQueueTrack(${idx}, ${t.track_index})">&minus;</button>`}
             </li>`).join('');
         document.getElementById('trackCount').textContent =
-            `${tracks.length} track${tracks.length === 1 ? '' : 's'} in queue`;
+            `${tracks.length} track${tracks.length === 1 ? '' : 's'}${isLocalMode ? '' : ' in queue'}`;
     }
 
     async function removeModalQueueTrack(idx, trackIndex) {
@@ -1890,6 +1992,10 @@
 
     function setVolume(val) {
         const v = Math.max(0, Math.min(100, parseInt(val) || 0));
+        if (isLocalMode) {
+            if (localAudio) localAudio.volume = v / 100;
+            return;
+        }
         clearTimeout(volumeDebounce);
         volumeDebounce = setTimeout(async () => {
             try {
@@ -1928,6 +2034,14 @@
     }
 
     async function syncVolume() {
+        if (isLocalMode) {
+            if (localAudio) {
+                const v = Math.round(localAudio.volume * 100);
+                document.getElementById('volumeSlider').value = v;
+                document.getElementById('volumeLabel').value = v;
+            }
+            return;
+        }
         try {
             const res = await fetch('/api/player/volume');
             const data = await res.json();
@@ -2085,25 +2199,34 @@
         const album = queue[idx];
         if (!album) { hideHover(); return; }
         const key = 'q' + album.id;
-        let data;
-        try {
-            data = await (await fetch(`/api/queue/album/${idx}/tracks`)).json();
-        } catch (e) { data = { tracks: [] }; }
+        let tracks, albumTitle;
+        if (isLocalMode) {
+            try {
+                const data = await fetch(`/api/albums/${album.id}/tracks`).then(r => r.json());
+                tracks = data.map(t => ({ number: t.track_number, title: t.title, track_index: t.id }));
+                albumTitle = album.title;
+            } catch (e) { tracks = []; albumTitle = album.title; }
+        } else {
+            let data;
+            try { data = await (await fetch(`/api/queue/album/${idx}/tracks`)).json(); }
+            catch (e) { data = { tracks: [] }; }
+            tracks = data.tracks || [];
+            albumTitle = data.album || album.title;
+        }
         if (hoverKey !== key) return;             // moved away while fetching
-        const tracks = data.tracks || [];
         const hc = document.getElementById('hovercard');
         hc.classList.add('interactive');
         hc.innerHTML =
-            `<div class="hovercard-tracks-head">${esc(data.album || album.title)}</div>` +
+            `<div class="hovercard-tracks-head">${esc(albumTitle)}</div>` +
             `<ul class="hovercard-tracks">` +
             tracks.map(t => `<li>
                 <span class="tn">${t.number || '·'}</span>
                 <span class="tt">${esc(t.title)}</span>
-                <button class="hc-remove" title="Remove track from queue"
-                        onclick="removeQueueTrack(${idx}, ${t.track_index})">&minus;</button>
+                ${isLocalMode ? '' : `<button class="hc-remove" title="Remove track from queue"
+                        onclick="removeQueueTrack(${idx}, ${t.track_index})">&minus;</button>`}
             </li>`).join('') +
             `</ul>` +
-            (tracks.length ? '' : `<div class="hovercard-more">No tracks queued</div>`);
+            (tracks.length ? '' : `<div class="hovercard-more">No tracks</div>`);
         if (reposition) {
             const el = document.querySelector(`.queue-item[data-queue-index="${idx}"]`);
             if (el) placeHover(el.getBoundingClientRect(), false);
@@ -2162,11 +2285,137 @@
     document.addEventListener('dragstart', () => { isDragging = true; hideHover(); });
     document.addEventListener('dragend',   () => { isDragging = false; });
 
+    // ── Local playback engine ─────────────────────────────────────────────
+    function initLocalAudio() {
+        if (localAudio) return;
+        localAudio = new Audio();
+        localAudio.addEventListener('play', () => {
+            isPlaying = true;
+            document.getElementById('playPauseBtn').innerHTML = '&#9646;&#9646;';
+        });
+        localAudio.addEventListener('pause', () => {
+            isPlaying = false;
+            document.getElementById('playPauseBtn').innerHTML = '&#9654;';
+        });
+        localAudio.addEventListener('ended', () => {
+            if (localTrackIdx + 1 < localTrackList.length) {
+                localPlayTrack(localTrackIdx + 1);
+            } else {
+                isPlaying = false;
+                localTrackIdx = -1;
+                document.getElementById('playPauseBtn').innerHTML = '&#9654;';
+            }
+        });
+        localAudio.addEventListener('error', () => {
+            console.error('Local audio error on track', localTrackIdx);
+            if (localTrackIdx + 1 < localTrackList.length) localPlayTrack(localTrackIdx + 1);
+        });
+    }
+
+    async function localPlayQueue() {
+        if (!queue.length) return;
+        initLocalAudio();
+        localTrackList = [];
+        for (const album of queue) {
+            try {
+                const tracks = await fetch(`/api/albums/${album.id}/tracks`).then(r => r.json());
+                for (const t of tracks) {
+                    localTrackList.push({
+                        id: t.id,
+                        title: t.title || '',
+                        artist: album.artist || '',
+                        albumTitle: album.title || '',
+                        albumArt: album.cover_art || artCache[album.id] || null,
+                        albumId: album.id
+                    });
+                }
+            } catch (e) { console.error('Error fetching tracks for', album.title, e); }
+        }
+        if (localTrackList.length) localPlayTrack(0);
+    }
+
+    function localPlayTrack(idx) {
+        if (!localAudio || idx < 0 || idx >= localTrackList.length) return;
+        localTrackIdx = idx;
+        const t = localTrackList[idx];
+        localAudio.src = `/stream/${t.id}`;
+        localAudio.play().catch(e => console.error('Local play error:', e));
+        updateLocalNowPlaying(t);
+        setMediaSession(t);
+    }
+
+    function updateLocalNowPlaying(t) {
+        const artEl  = document.getElementById('npArt');
+        const textEl = document.getElementById('npText');
+        textEl.innerHTML = `
+            <div class="np-title">${esc(t.title)}</div>
+            <div class="np-artist">${esc(t.artist)}</div>`;
+        if (t.albumArt) {
+            artEl.src = artSrc(t.albumArt);
+            artEl.style.visibility = 'visible';
+        } else {
+            artEl.style.visibility = 'hidden';
+        }
+        const matched = albums.find(a => a.id === t.albumId);
+        if (matched !== currentPlayingAlbum) {
+            currentPlayingAlbum = matched || null;
+            renderQueue();
+        }
+    }
+
+    function setMediaSession(t) {
+        if (!('mediaSession' in navigator)) return;
+        navigator.mediaSession.metadata = new MediaMetadata({
+            title: t.title,
+            artist: t.artist,
+            album: t.albumTitle,
+            artwork: t.albumArt
+                ? [{ src: artSrc(t.albumArt), sizes: '512x512', type: artMime(t.albumArt) }]
+                : []
+        });
+        navigator.mediaSession.setActionHandler('play',          () => localAudio.play());
+        navigator.mediaSession.setActionHandler('pause',         () => localAudio.pause());
+        navigator.mediaSession.setActionHandler('nexttrack',     () => localNextTrack());
+        navigator.mediaSession.setActionHandler('previoustrack', () => localPrevTrack());
+        navigator.mediaSession.setActionHandler('seekto',        d => { localAudio.currentTime = d.seekTime; });
+    }
+
+    function localNextTrack() {
+        if (localTrackIdx + 1 < localTrackList.length) localPlayTrack(localTrackIdx + 1);
+    }
+
+    function localPrevTrack() {
+        if (localAudio && localAudio.currentTime > 3) {
+            localAudio.currentTime = 0;
+        } else if (localTrackIdx > 0) {
+            localPlayTrack(localTrackIdx - 1);
+        }
+    }
+
+    function localNextAlbum() {
+        if (!localTrackList.length || localTrackIdx < 0) return;
+        const curId = localTrackList[localTrackIdx].albumId;
+        const next  = localTrackList.findIndex((t, i) => i > localTrackIdx && t.albumId !== curId);
+        if (next >= 0) localPlayTrack(next);
+    }
+
+    function localPrevAlbum() {
+        if (!localTrackList.length || localTrackIdx < 0) return;
+        const curId    = localTrackList[localTrackIdx].albumId;
+        const curStart = localTrackList.findIndex(t => t.albumId === curId);
+        if (localTrackIdx > curStart) { localPlayTrack(curStart); return; }
+        if (curStart === 0) return;
+        const prevId    = localTrackList[curStart - 1].albumId;
+        const prevStart = localTrackList.findIndex(t => t.albumId === prevId);
+        localPlayTrack(prevStart);
+    }
+
     // ── Init ──────────────────────────────────────────────────────────────
+    if (localStorage.getItem('localMode') === 'true') isLocalMode = true;
     loadAlbums();
     loadSpeakers();
     updatePlayerStatus();
-    syncVolume();
+    if (!isLocalMode) syncVolume();
     setInterval(updatePlayerStatus, 2000);
     setInterval(syncVolume, 10000);
     backgroundRescan();
