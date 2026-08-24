@@ -4,6 +4,8 @@ A self-hosted web app for browsing your music library by album and playing throu
 
 **Designed by Alan Marks. Built with [Claude](https://claude.ai).** Bug reports and pull requests welcome.
 
+![Screenshot](docs/screenshot.png)
+
 ---
 
 ## Features
