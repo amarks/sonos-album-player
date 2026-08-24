@@ -2,7 +2,7 @@
 
 A self-hosted web app for browsing your music library by album and playing through Sonos — or directly on the device you're using (iPhone, Mac, etc.).
 
-**Designed by Alan Marks. Built with [Claude](https://claude.ai).** Bug reports and pull requests welcome.
+**Designed by Alan Marks. Built with [Claude](https://claude.ai).** Bug reports and pull requests welcome — see [CONTRIBUTING](CONTRIBUTING.md).
 
 ![Screenshot](docs/screenshot.png)
 
