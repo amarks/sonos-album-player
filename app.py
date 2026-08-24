@@ -11,6 +11,8 @@ import json
 import os
 import re
 import sys
+import subprocess
+import datetime
 from pathlib import Path
 import base64
 import time
@@ -618,9 +620,31 @@ def get_sonos_controller():
         return None
 
 # API Routes
+def _compute_version():
+    """CalVer, e.g. '2026.08.23'.
+
+    Prefers the last git commit date; on server deploys (scp of just app.py, no
+    .git present) falls back to today's date, which matches the deploy day in
+    practice since use_reloader=True restarts the process the moment app.py is
+    replaced.
+    """
+    try:
+        result = subprocess.run(
+            ['git', 'log', '-1', '--format=%cs'],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True, text=True, timeout=2
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip().replace('-', '.')
+    except Exception:
+        pass
+    return datetime.date.today().isoformat().replace('-', '.')
+
+APP_VERSION = _compute_version()
+
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return render_template('index.html', version=APP_VERSION)
 
 @app.route('/manifest.json')
 def manifest():

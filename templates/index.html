@@ -89,12 +89,64 @@
         }
 
         .header h1 {
-            font-size: 15px;
-            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
             color: var(--text);
-            white-space: nowrap;
             margin-right: 4px;
+            cursor: pointer;
+            transition: transform 0.4s ease;
         }
+        .header h1:hover { transform: rotate(30deg); }
+        .header h1 svg { display: block; }
+
+        /* Help modal — reuses .modal-overlay / .modal / .modal-close */
+        .help-modal { max-width: 480px; }
+        .help-body { padding: 28px 30px 30px; }
+        .help-body h2 {
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--text);
+            margin-bottom: 6px;
+        }
+        .help-body > p {
+            font-size: 14px;
+            color: var(--text-2);
+            margin-bottom: 18px;
+            line-height: 1.5;
+        }
+        .help-body dl {
+            display: grid;
+            grid-template-columns: 84px 1fr;
+            column-gap: 18px;
+            row-gap: 12px;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        .help-body dt { color: var(--text); font-weight: 600; }
+        .help-body dd { color: var(--text-2); }
+        .help-body b { color: var(--text); font-weight: 600; }
+        .help-body kbd {
+            display: inline-block;
+            font-family: inherit;
+            background: var(--surface-3);
+            color: var(--text);
+            padding: 1px 6px;
+            border-radius: 4px;
+            font-size: 12px;
+            border: 1px solid var(--border);
+        }
+        .help-foot {
+            margin-top: 20px;
+            padding-top: 14px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 12px;
+            color: var(--text-3);
+        }
+        .help-foot a { color: var(--text-2); text-decoration: none; transition: color 0.15s; }
+        .help-foot a:hover { color: var(--accent); }
 
         .sort-controls {
             display: flex;
@@ -228,18 +280,12 @@
         .queue-header {
             display: flex;
             align-items: center;
-            justify-content: space-between;
-            padding: 12px 14px;
+            justify-content: flex-start;
+            /* padding-left: 18px = queue-scroll padding (10px) + queue-item padding (8px)
+               so the first button lines up with the album art thumbnails below. */
+            padding: 12px 18px;
             border-bottom: 1px solid var(--border);
             flex-shrink: 0;
-        }
-
-        .queue-label {
-            font-size: 11px;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.07em;
-            color: var(--text-3);
         }
 
         .queue-buttons { display: flex; gap: 6px; align-items: center; }
@@ -1181,7 +1227,13 @@
     <!-- Header -->
     <div class="header">
         <button class="queue-toggle-btn" id="queueToggleBtn" onclick="toggleQueuePanel()" title="Queue">&#9776;</button>
-        <h1>Sonos</h1>
+        <h1 aria-label="About Album Player" title="About" onclick="showHelp()">
+            <svg viewBox="0 0 24 24" width="36" height="36" aria-hidden="true">
+                <circle cx="12" cy="12" r="10" fill="var(--surface-3)"/>
+                <circle cx="12" cy="12" r="4" fill="var(--accent)"/>
+                <circle cx="12" cy="12" r="1" fill="var(--bg)"/>
+            </svg>
+        </h1>
         <div class="sort-controls">
             <button class="sort-btn active" data-sort="artist">Artists</button>
             <button class="sort-btn" data-sort="title">Albums</button>
@@ -1212,7 +1264,6 @@
     <!-- Queue -->
     <div class="queue-section">
         <div class="queue-header">
-            <span class="queue-label">Queue</span>
             <div class="queue-buttons">
                 <button class="shuffle-btn" id="shuffleBtn" onclick="toggleShuffle()" title="Shuffle" aria-label="Shuffle" aria-pressed="false">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1310,6 +1361,35 @@
             <div class="modal-footer">
                 <span id="trackCount"></span>
                 <button class="add-to-queue-btn" id="modalAddBtn" onclick="addModalAlbumToQueue()">Add to Queue</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Help modal -->
+    <div class="modal-overlay" id="helpModalOverlay" onclick="closeHelp(event)">
+        <div class="modal help-modal" onclick="event.stopPropagation()">
+            <button class="modal-close" onclick="closeHelp()">&#x2715;</button>
+            <div class="help-body">
+                <h2>Album Player</h2>
+                <p>Browse your music library and play on a Sonos speaker or on this device.</p>
+                <dl>
+                    <dt>Browse</dt>
+                    <dd>Sort by <b>Artists</b>, <b>Albums</b>, or <b>Genre</b>. Search with <kbd>\</kbd> or <kbd>/</kbd>.</dd>
+                    <dt>Play</dt>
+                    <dd>Pick a Sonos speaker &mdash; or <b>This device</b> &mdash; from the speaker button in the header.</dd>
+                    <dt>Queue</dt>
+                    <dd>Drag albums into the queue, or click the <b>+</b> that appears on hover. Drag queue items to reorder. Click a queue item to see or remove individual tracks.</dd>
+                    <dt>Shuffle</dt>
+                    <dd>Plays each queued track once across all queued albums, then stops.</dd>
+                    <dt>Volume</dt>
+                    <dd>Slider, <b>&minus;/+</b> buttons or <kbd>&minus;</kbd>/<kbd>+</kbd> keys, mouse wheel over the volume area, or click the number to type one.</dd>
+                    <dt>Now playing</dt>
+                    <dd>Single arrows skip a track; double arrows skip a whole album.</dd>
+                </dl>
+                <div class="help-foot">
+                    <span>v{{ version }}</span>
+                    <a href="https://github.com/amarks/sonos-album-player" target="_blank" rel="noopener">github.com/amarks/sonos-album-player</a>
+                </div>
             </div>
         </div>
     </div>
@@ -2151,8 +2231,20 @@
     }
 
     document.addEventListener('keydown', e => {
-        if (e.key === 'Escape') closeModal({ target: { id: 'modalOverlay' }});
+        if (e.key === 'Escape') {
+            closeModal({ target: { id: 'modalOverlay' }});
+            closeHelp({ target: { id: 'helpModalOverlay' }});
+        }
     });
+
+    function showHelp() {
+        document.getElementById('helpModalOverlay').classList.add('active');
+    }
+    function closeHelp(event) {
+        if (!event || event.target.id === 'helpModalOverlay') {
+            document.getElementById('helpModalOverlay').classList.remove('active');
+        }
+    }
 
     // ── Search shortcuts ──────────────────────────────────────────────────
     // Esc inside the search box clears it (then blurs on a second press)
@@ -2164,6 +2256,18 @@
             event.stopPropagation();
         }
     }
+
+    // "+" / "-" adjust volume when not typing in a field
+    document.addEventListener('keydown', e => {
+        if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable) return;
+        if (e.key === '+' || e.key === '=') {           // = so plus works without Shift on US layouts
+            e.preventDefault();
+            nudgeVolume(1);
+        } else if (e.key === '-' || e.key === '_') {
+            e.preventDefault();
+            nudgeVolume(-1);
+        }
+    });
 
     // "\" or "/" jumps to the search box (unless already typing in a field)
     document.addEventListener('keydown', e => {
