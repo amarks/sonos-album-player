@@ -1,0 +1,30 @@
+# Docker Compose spec: works with `docker compose up -d`.
+# `version:` is intentionally omitted — deprecated in modern Compose.
+services:
+  sonos-player:
+    build: .
+    container_name: sonos-album-player
+    # Host networking is required so Sonos SSDP multicast discovery works
+    # (soco.discover uses multicast, which doesn't cross Docker's bridge
+    # network). This also means the container binds directly to whichever
+    # port config.json specifies (default 5100) — a `ports:` mapping here
+    # would be ignored, so it isn't included.
+    # Note: `network_mode: host` is a Linux-only feature. On Docker Desktop
+    # for macOS/Windows, Sonos won't be discovered — use the venv path
+    # from the README instead.
+    network_mode: host
+    volumes:
+      # Read-only mount of your music library. Adjust the host path to
+      # wherever your files actually live (NAS share, local dir, etc.).
+      - /volume1/music:/music:ro
+      # Persistent SQLite DB + any writable state. Points at the /data
+      # path referenced by config.json (database_path).
+      - ./data:/data
+      # Config file — copy config.json.example to config.json before
+      # first run and set:
+      #   music_directory: /music
+      #   database_path:   /data/sonos_albums.db
+      - ./config.json:/app/config.json
+    restart: unless-stopped
+    environment:
+      - TZ=America/Los_Angeles

@@ -26,7 +26,7 @@ A self-hosted web app for browsing your music library by album and playing throu
 - Music files in MP3, FLAC, or M4A format
 - The machine running the app must be able to read your music files
 
-The app runs as a plain Python process — no Docker required, though a Dockerfile is included if you prefer containers.
+The app runs as a plain Python process — no Docker required, though a Dockerfile and Compose file are included if you prefer containers (see [Docker](#docker-optional) below).
 
 ## Setup
 
@@ -113,6 +113,48 @@ sudo systemctl start sonos-album-player
 ```
 
 Once running, access it from any device on your network at `http://<server-ip>:5100` (e.g. `http://192.168.1.50:5100`).
+
+## Docker (optional)
+
+A `Dockerfile` and `docker-compose.yml` are included. Only works on Linux hosts — Sonos discovery uses SSDP multicast, which requires `network_mode: host`, and Docker Desktop on macOS/Windows doesn't support host networking the same way.
+
+**1. Prepare config**
+
+```bash
+cp config.json.example config.json
+```
+
+Edit `config.json` for the container's mount paths:
+
+```json
+{
+  "sonos_ip": "",
+  "music_directory": "/music",
+  "database_path": "/data/sonos_albums.db",
+  "port": 5100,
+  "items_per_page": 1000
+}
+```
+
+Also edit the music-library bind mount in `docker-compose.yml` (`/volume1/music` → wherever your files live) and create the data dir:
+
+```bash
+mkdir data
+```
+
+**2. Build and start**
+
+```bash
+docker compose up -d
+```
+
+**3. Scan the library** (first run and after adding music)
+
+```bash
+docker compose exec sonos-player python app.py scan
+```
+
+Then browse to `http://<host-ip>:5100`.
 
 ## Usage
 
