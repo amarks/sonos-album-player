@@ -160,4 +160,4 @@ Make sure your FLAC files have an `ALBUM` Vorbis comment tag. Files without an a
 
 ## License
 
-MIT
+[MIT](LICENSE) &copy; 2026 Alan Marks
