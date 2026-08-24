@@ -77,6 +77,8 @@ python3 app.py
 
 Open `http://localhost:5100` in your browser.
 
+Flask's reloader is on, so edits to `app.py` restart the process automatically and edits to `templates/index.html` show up on the next refresh — no need to bounce the server while developing.
+
 ## Running on a home server or NAS
 
 The app is designed to run as a background process on an always-on machine (NAS, Raspberry Pi, old Mac mini, etc.) so it's available from any device on your network.

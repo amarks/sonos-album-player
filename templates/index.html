@@ -15,6 +15,8 @@
     <meta name="apple-mobile-web-app-title" content="Albums">
     <link rel="manifest" href="/manifest.json">
     <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="/static/icons/icon-512.png">
     <style>
         :root {
             --bg: #0c0e14;          /* deep blue-slate, near black */
@@ -540,10 +542,11 @@
             max-width: 520px;
         }
 
+        .search-wrap { position: relative; flex: 1; min-width: 0; display: flex; }
         .search-box {
-            flex: 1;
+            width: 100%;
             min-width: 0;
-            padding: 7px 14px;
+            padding: 7px 30px 7px 14px;
             border: 1px solid var(--border);
             border-radius: 8px;
             font-size: 13px;
@@ -560,7 +563,79 @@
             background: var(--surface-2);
         }
 
+        .search-clear {
+            position: absolute;
+            right: 6px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 20px; height: 20px;
+            border: none;
+            background: transparent;
+            color: var(--text-3);
+            cursor: pointer;
+            font-size: 15px;
+            line-height: 1;
+            border-radius: 4px;
+            display: none;
+            align-items: center;
+            justify-content: center;
+        }
+        /* Show only when the box has content (uses :placeholder-shown so it's pure CSS). */
+        .search-box:not(:placeholder-shown) + .search-clear { display: flex; }
+        .search-clear:hover { color: var(--text); background: var(--surface-3); }
+
         .search-results { font-size: 12px; color: var(--text-3); white-space: nowrap; flex-shrink: 0; }
+
+        .icon-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 34px;
+            height: 34px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: transparent;
+            color: var(--text-2);
+            cursor: pointer;
+            transition: color 0.15s, border-color 0.15s, background 0.15s;
+            flex-shrink: 0;
+        }
+        .icon-btn:hover { color: var(--text); border-color: var(--surface-3); background: var(--surface-2); }
+        .icon-btn.spinning svg { animation: iconSpin 1.1s linear infinite; }
+        @keyframes iconSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+        /* Toast notifications — bottom-center, above the player bar */
+        .toast-container {
+            position: fixed;
+            bottom: calc(100px + env(safe-area-inset-bottom, 0px));
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            z-index: 500;
+            pointer-events: none;
+        }
+        .toast {
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px 16px;
+            font-size: 13px;
+            color: var(--text);
+            box-shadow: 0 8px 28px rgba(0,0,0,0.5);
+            animation: toastIn 0.2s ease-out;
+            max-width: min(360px, calc(100vw - 32px));
+            pointer-events: auto;
+        }
+        .toast.error {
+            border-color: var(--danger);
+            background: var(--danger-weak);
+        }
+        .toast.fade { animation: toastOut 0.25s ease forwards; }
+        @keyframes toastIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes toastOut { to { opacity: 0; transform: translateY(-4px); } }
 
         /* Album grid */
         .albums-grid {
@@ -1241,9 +1316,19 @@
         </div>
 
         <div class="header-search">
-            <input type="text" class="search-box" id="searchBox"
-                   placeholder="Search…  ( \ or / )"
-                   oninput="filterAlbums()" onkeydown="onSearchKey(event)">
+            <div class="search-wrap">
+                <input type="text" class="search-box" id="searchBox"
+                       placeholder="Search…  ( \ or / )"
+                       oninput="filterAlbums()" onkeydown="onSearchKey(event)">
+                <button class="search-clear" onclick="clearSearch()" tabindex="-1" aria-label="Clear search" title="Clear (Esc)">&times;</button>
+            </div>
+            <button class="icon-btn" id="rescanBtn" onclick="manualRescan()" title="Rescan library" aria-label="Rescan library">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <polyline points="23 4 23 10 17 10"/>
+                    <polyline points="1 20 1 14 7 14"/>
+                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                </svg>
+            </button>
             <span class="search-results" id="searchResults"></span>
         </div>
 
@@ -1342,6 +1427,9 @@
 
     <!-- Hover preview (album cover / queue tracks) -->
     <div class="hovercard" id="hovercard"></div>
+
+    <!-- Toast notifications -->
+    <div class="toast-container" id="toastContainer" aria-live="polite"></div>
 
     <!-- Modal -->
     <div class="modal-overlay" id="modalOverlay" onclick="closeModal(event)">
@@ -1681,13 +1769,13 @@
             const res = await fetch(`/api/queue/add/${album.id}`, { method: 'POST' });
             const result = await res.json();
             if (!res.ok) {
-                alert(`Error: ${result.error}\n\n${result.suggestion || ''}`);
+                showToast(result.error || 'Sonos rejected the add', 'error');
                 queue.pop();
                 renderQueue();
                 saveQueueState();
             }
         } catch (e) {
-            alert('Error connecting to Sonos');
+            showToast('Error connecting to Sonos', 'error');
             queue.pop();
             renderQueue();
             saveQueueState();
@@ -1714,10 +1802,10 @@
         try {
             const res = await fetch('/api/queue/play', { method: 'POST' });
             const result = await res.json();
-            if (!res.ok) { alert(`Error: ${result.error}`); return; }
+            if (!res.ok) { showToast(result.error || 'Playback failed', 'error'); return; }
             isPlaying = true;
             document.getElementById('playPauseBtn').innerHTML = '&#9646;&#9646;';
-        } catch (e) { alert('Error starting playback'); }
+        } catch (e) { showToast('Error starting playback', 'error'); }
     }
 
     async function removeFromQueue(index) {
@@ -2257,17 +2345,80 @@
         }
     }
 
-    // "+" / "-" adjust volume when not typing in a field
+    // "+" / "-" adjust volume, Space toggles play/pause, when not typing in a field
+    // (skip BUTTON focus so we don't hijack keyboard activation of the focused button).
     document.addEventListener('keydown', e => {
-        if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable) return;
+        if (/^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(e.target.tagName) || e.target.isContentEditable) return;
         if (e.key === '+' || e.key === '=') {           // = so plus works without Shift on US layouts
             e.preventDefault();
             nudgeVolume(1);
         } else if (e.key === '-' || e.key === '_') {
             e.preventDefault();
             nudgeVolume(-1);
+        } else if (e.key === ' ') {
+            e.preventDefault();  // stop page scroll
+            togglePlayPause();
         }
     });
+
+    // Ephemeral toast at the bottom center — for user-initiated actions
+    // whose success/failure isn't otherwise visible.
+    function showToast(message, type = 'info', ms = 3200) {
+        const container = document.getElementById('toastContainer');
+        if (!container) return;
+        const el = document.createElement('div');
+        el.className = 'toast' + (type === 'error' ? ' error' : '');
+        el.textContent = message;
+        container.appendChild(el);
+        setTimeout(() => {
+            el.classList.add('fade');
+            setTimeout(() => el.remove(), 260);
+        }, ms);
+    }
+
+    function clearSearch() {
+        const box = document.getElementById('searchBox');
+        if (!box.value) return;
+        box.value = '';
+        filterAlbums();
+        box.focus();
+    }
+
+    // Kick a fresh incremental scan (force=1 skips the cooldown since user asked).
+    // Polls status and toasts the outcome. Guards against multiple concurrent invocations.
+    let _rescanning = false;
+    async function manualRescan() {
+        if (_rescanning) return;
+        _rescanning = true;
+        const btn = document.getElementById('rescanBtn');
+        if (btn) btn.classList.add('spinning');
+        showToast('Scanning library…');
+        try {
+            await fetch('/api/rescan?force=1', { method: 'POST' });
+            for (let i = 0; i < 30; i++) {
+                await new Promise(r => setTimeout(r, 2000));
+                const s = await (await fetch('/api/rescan/status')).json();
+                if (!s.running) {
+                    const r = s.last_result || {};
+                    const changed = (r.added || 0) + (r.updated || 0) + (r.removed || 0);
+                    if (changed > 0) {
+                        showToast(`Library updated: +${r.added || 0} · ~${r.updated || 0} · −${r.removed || 0}`);
+                        loadAlbums(currentSort);
+                    } else {
+                        showToast('Library is up to date');
+                    }
+                    return;
+                }
+            }
+            showToast('Scan is taking longer than expected — still running in the background');
+        } catch (e) {
+            console.error('Rescan failed:', e);
+            showToast('Rescan failed — check server logs', 'error');
+        } finally {
+            _rescanning = false;
+            if (btn) btn.classList.remove('spinning');
+        }
+    }
 
     // "\" or "/" jumps to the search box (unless already typing in a field)
     document.addEventListener('keydown', e => {
