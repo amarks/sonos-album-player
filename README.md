@@ -21,7 +21,7 @@ A self-hosted web app for browsing your music library by album and playing throu
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.8 or newer (tested on 3.8, 3.11, and 3.14)
 - A Sonos system (for Sonos playback; local device playback works without one)
 - Music files in MP3, FLAC, or M4A format
 - The machine running the app must be able to read your music files
