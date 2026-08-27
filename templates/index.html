@@ -444,7 +444,7 @@
             flex-shrink: 0;
         }
 
-        .queue-item.now-playing .playing-indicator { display: flex; }
+        body.player-playing .queue-item.now-playing .playing-indicator { display: flex; }
 
         .playing-indicator span {
             display: block;
@@ -1999,6 +1999,7 @@
             await fetch(endpoint, { method: 'POST' });
             isPlaying = !isPlaying;
             document.getElementById('playPauseBtn').innerHTML = isPlaying ? '&#9646;&#9646;' : '&#9654;';
+            document.body.classList.toggle('player-playing', isPlaying);
         } catch (e) { console.error(e); }
     }
 
@@ -2035,6 +2036,7 @@
 
             isPlaying = status.state === 'PLAYING';
             document.getElementById('playPauseBtn').innerHTML = isPlaying ? '&#9646;&#9646;' : '&#9654;';
+            document.body.classList.toggle('player-playing', isPlaying);
 
             // Reflect Sonos-side play_mode so external changes (Sonos app) sync into the UI.
             if (status.play_mode !== undefined) {
@@ -2767,10 +2769,12 @@
         localAudio.addEventListener('play', () => {
             isPlaying = true;
             document.getElementById('playPauseBtn').innerHTML = '&#9646;&#9646;';
+            document.body.classList.add('player-playing');
         });
         localAudio.addEventListener('pause', () => {
             isPlaying = false;
             document.getElementById('playPauseBtn').innerHTML = '&#9654;';
+            document.body.classList.remove('player-playing');
         });
         localAudio.addEventListener('ended', () => {
             if (shuffleOn) {
@@ -2779,6 +2783,7 @@
                 isPlaying = false;
                 localTrackIdx = -1;
                 document.getElementById('playPauseBtn').innerHTML = '&#9654;';
+                document.body.classList.remove('player-playing');
                 return;
             }
             if (localTrackIdx + 1 < localTrackList.length) {
@@ -2787,6 +2792,7 @@
                 isPlaying = false;
                 localTrackIdx = -1;
                 document.getElementById('playPauseBtn').innerHTML = '&#9654;';
+                document.body.classList.remove('player-playing');
             }
         });
         localAudio.addEventListener('error', () => {

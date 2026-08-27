@@ -610,10 +610,20 @@ def get_sonos_controller():
             logger.error("No Sonos devices found on network")
             return None
         device = next(iter(devices))
-        logger.info(f"Discovered Sonos device at {device.ip_address}")
-        config['sonos_ip'] = device.ip_address
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(config, f, indent=2)
+        # Only persist the discovered IP on first run (no configured IP). If
+        # sonos_ip was set but momentarily unreachable, do NOT overwrite it —
+        # queues and speaker selection are keyed by sonos_ip, so silently
+        # rebinding to whichever device answered first jumps the user to a
+        # random group and swaps their saved queue.
+        if not sonos_ip:
+            logger.info(f"Discovered Sonos device at {device.ip_address}; persisting to config")
+            config['sonos_ip'] = device.ip_address
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(config, f, indent=2)
+        else:
+            logger.warning(
+                f"Configured Sonos IP {sonos_ip} unreachable; using discovered "
+                f"{device.ip_address} for this call only (config not updated)")
         return get_coordinator(device)
     except Exception as e:
         logger.error(f"Sonos discovery failed: {e}")
@@ -841,23 +851,23 @@ def _add_album_tracks(sonos, album_id):
     album_title = album_info['title']
     artist = album_info['artist']
 
-    # Search for album in Sonos music library
-    logger.info(f"Searching Sonos library for: {artist} - {album_title}")
-    results = sonos.music_library.get_albums(search_term=album_title)
-    logger.info(f"Found {len(results)} results")
+    logger.info(f"Resolve album id={album_id}: DB title='{album_title}' artist='{artist}'")
+    results = list(sonos.music_library.get_albums(search_term=album_title))
+    logger.info(f"Sonos returned {len(results)} candidate(s):")
+    for i, r in enumerate(results):
+        logger.info(f"  [{i}] title='{r.title}' creator='{r.creator}' item_id='{r.item_id}'")
 
-    # Find the best match
     album_item = None
-    for result in results:
-        logger.info(f"  Result: {result.creator} - {result.title}")
+    match_reason = None
+    for i, result in enumerate(results):
         if album_title.lower() in result.title.lower():
             if artist and artist.lower() in result.creator.lower():
                 album_item = result
-                logger.info(f"  ✓ Matched on title and artist")
+                match_reason = f"title+artist match on [{i}]"
                 break
-            elif not album_item:  # Keep first title match as fallback
+            elif not album_item:
                 album_item = result
-                logger.info(f"  ~ Partial match on title only")
+                match_reason = f"title-only fallback on [{i}] (no artist match found)"
 
     if not album_item:
         logger.warning(f"Album not found in Sonos library: {artist} - {album_title}")
@@ -866,12 +876,35 @@ def _add_album_tracks(sonos, album_id):
                     'artist': artist,
                     'suggestion': 'Make sure Sonos has indexed this music'}, 404)
 
-    # Browse the album and append every track
-    logger.info(f"Adding album to queue: {album_item.item_id}")
-    tracks = sonos.music_library.browse(album_item)
+    logger.info(
+        f"→ Chose: title='{album_item.title}' creator='{album_item.creator}' "
+        f"item_id='{album_item.item_id}' ({match_reason})")
+
+    tracks = list(sonos.music_library.browse(album_item))
+
+    def _brief(ts):
+        return ' | '.join(
+            f"#{getattr(t, 'original_track_number', '?')}={getattr(t, 'title', '?')}" for t in ts)
+
+    logger.info(f"browse() returned {len(tracks)} track(s): {_brief(tracks)}")
+
+    # Sort by track number so we always append in play order, regardless of
+    # what order Sonos's library index returns (which for compilations and
+    # sparsely-tagged albums is not guaranteed to be track-number order).
+    # Python's sort is stable, so tracks without a number keep their browse
+    # order and land after the numbered ones.
+    def _sort_key(t):
+        n = getattr(t, 'original_track_number', None)
+        try:
+            return int(n)
+        except (TypeError, ValueError):
+            return 10**9
+
+    tracks.sort(key=_sort_key)
+    logger.info(f"After track-number sort:      {_brief(tracks)}")
+
     tracks_added = 0
     for track in tracks:
-        logger.info(f"  Adding track: {track.title}")
         sonos.add_to_queue(track)
         tracks_added += 1
     logger.info(f"Added {tracks_added} tracks from '{album_title}' to queue")
@@ -1099,17 +1132,6 @@ def _saved_queue_albums():
     return [by_id[i] for i in ids if i in by_id]
 
 
-def _sonos_queue_album_runs(sonos):
-    """Collapse the flat Sonos queue into its sequence of album titles (one per run)."""
-    runs, last = [], object()
-    for t in sonos.get_queue(max_items=1000):
-        alb = (getattr(t, 'album', None) or '').strip()
-        if alb != last:
-            runs.append(alb)
-            last = alb
-    return runs
-
-
 def _album_run_ranges_from_queue(queue_items):
     """Describe each album's contiguous block within an already-fetched Sonos queue.
 
@@ -1132,59 +1154,43 @@ def _sonos_queue_album_run_ranges(sonos):
     return _album_run_ranges_from_queue(sonos.get_queue(max_items=1000))
 
 
-def _queue_matches_sidebar(sonos):
-    """True only when we're confident the Sonos queue already matches the sidebar.
-
-    Compares the ordered album runs in the Sonos queue against the saved sidebar
-    order with a lenient title match. Errs toward False (rebuild) when unsure —
-    rebuilding is always safe, silently playing the wrong queue is not.
-    """
-    saved = _saved_queue_albums()
-    if not saved:
-        return True  # nothing saved to reconcile against
-    runs = _sonos_queue_album_runs(sonos)
-    if len(runs) != len(saved):
-        return False
-    for want, got in zip(saved, runs):
-        wt = (want.get('title') or '').lower()
-        gt = (got or '').lower()
-        if not wt or (wt not in gt and gt not in wt):
-            return False
-    return True
-
-
 @app.route('/api/queue/play', methods=['POST'])
 def play_queue():
-    """Play from the queue, first rebuilding the Sonos queue if it has drifted
-    from the sidebar (e.g. an earlier add failed, or Sonos was touched elsewhere)."""
+    """Play from the sidebar queue.
+
+    Play is authoritative: always wipe the Sonos queue and rebuild from the
+    saved sidebar order. Anything queued externally (Sonos app, another session,
+    stale tracks from an earlier run) is discarded so playback matches what the
+    user sees in the sidebar.
+    """
     sonos = get_sonos_controller()
     if not sonos:
         return jsonify({'error': 'Cannot connect to Sonos'}), 500
 
     try:
-        rebuilt = False
-        if not _queue_matches_sidebar(sonos):
-            saved = _saved_queue_albums()
-            logger.warning(
-                f"Sonos queue diverges from sidebar ({len(saved)} album(s) saved); rebuilding")
-            sonos.clear_queue()
-            for a in saved:
-                added, error = _add_album_tracks(sonos, a['id'])
-                if error:
-                    logger.warning(
-                        f"Reconcile: could not add album {a['id']} "
-                        f"({a.get('title')}): {error[0]}")
-            rebuilt = True
+        saved = _saved_queue_albums()
+        if not saved:
+            return jsonify({'error': 'Queue is empty'}), 400
+
+        sonos.stop()
+        sonos.clear_queue()
+        for a in saved:
+            _, error = _add_album_tracks(sonos, a['id'])
+            if error:
+                logger.warning(
+                    f"Play: could not add album {a['id']} "
+                    f"({a.get('title')}): {error[0]}")
 
         queue = sonos.get_queue()
         if len(queue) == 0:
             return jsonify({'error': 'Queue is empty'}), 400
 
-        sonos.stop()
         sonos.play_from_queue(0)
 
-        logger.info(f"Started playing queue with {len(queue)} tracks (rebuilt={rebuilt})")
-        return jsonify({'success': True, 'queue_length': len(queue), 'rebuilt': rebuilt})
+        logger.info(
+            f"Started playing queue with {len(queue)} tracks "
+            f"(rebuilt from {len(saved)} album(s))")
+        return jsonify({'success': True, 'queue_length': len(queue)})
     except Exception as e:
         logger.error(f"Error playing queue: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
