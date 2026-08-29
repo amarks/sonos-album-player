@@ -2342,7 +2342,7 @@
         if (event.key === 'Escape') {
             const box = document.getElementById('searchBox');
             if (box.value) { box.value = ''; filterAlbums(); }
-            else { box.blur(); }
+            box.blur();
             event.stopPropagation();
         }
     }
