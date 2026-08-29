@@ -399,9 +399,12 @@ def scan_music_library(full=False):
     
     # Directories to exclude
     excluded_dirs = {
-        '#recycle', '@eaDir', '.DS_Store', 'Thumbs.db', 
+        '#recycle', '@eaDir', '.DS_Store', 'Thumbs.db',
         '@Transcode', '#snapshot', '.@__thumb', '@tmp',
-        '.AppleDouble', '.TemporaryItems', '.Trashes'
+        '.AppleDouble', '.TemporaryItems', '.Trashes',
+        # Holding area for partial/quarantined albums — must not be indexed, or
+        # moving something there does not actually take it out of the player.
+        '_review'
     }
     
     # Group files by directory (assuming one album per directory)
